@@ -1,0 +1,95 @@
+name: Backfill competiciones masculinas
+
+on:
+  workflow_dispatch:
+    inputs:
+      temporada:
+        description: "Temporada"
+        required: true
+        default: "2022-23"
+        type: choice
+        options:
+          - todas
+          - "2022-23"
+          - "2023-24"
+          - "2024-25"
+          - "2025-26"
+          - "2026-27"
+
+      competicion:
+        description: "Competición complementaria"
+        required: true
+        default: "todas"
+        type: choice
+        options:
+          - todas
+          - copa
+          - supercopa
+          - champions
+          - europa
+          - conference
+
+      dry_run:
+        description: "Solo validar Transfermarkt/parser; no escribir partidos"
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: backfill-competiciones-masculinas
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v7
+
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar backfill
+        working-directory: ingestion
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+          INPUT_TEMPORADA: ${{ inputs.temporada }}
+          INPUT_COMPETICION: ${{ inputs.competicion }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$INPUT_TEMPORADA" == "todas" ]]; then
+            TEMPORADAS=("2022-23" "2023-24" "2024-25" "2025-26" "2026-27")
+          else
+            TEMPORADAS=("$INPUT_TEMPORADA")
+          fi
+
+          EXTRA=()
+          if [[ "$INPUT_DRY_RUN" == "true" ]]; then
+            EXTRA+=("--dry-run")
+          fi
+
+          for TEMP in "${TEMPORADAS[@]}"; do
+            echo "============================================================"
+            echo "TEMPORADA $TEMP"
+            echo "============================================================"
+
+            python competiciones_masculinas.py \
+              --temporada "$TEMP" \
+              --competicion "$INPUT_COMPETICION" \
+              "${EXTRA[@]}"
+          done
