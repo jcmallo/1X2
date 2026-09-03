@@ -144,6 +144,29 @@ class ApiIngesta:
             raise RuntimeError("La API devolvió 'items' con formato inválido.")
         return items
 
+    def contexto_clima_historico(self, limite: int = 500) -> list[dict]:
+        data = self._request_json(
+            "GET",
+            "contexto_clima_historico.php",
+            params={"limite": max(1, min(1000, int(limite)))},
+            timeout=45,
+        )
+        items = data.get("items", [])
+        if not isinstance(items, list):
+            raise RuntimeError(
+                "La API devolvió 'items' de clima histórico "
+                "con formato inválido."
+            )
+        return items
+
+    def guardar_clima_historico(self, payload: dict) -> dict:
+        return self._request_json(
+            "POST",
+            "guardar_clima_historico.php",
+            json=payload,
+            timeout=60,
+        )
+
     def contexto_partidos(
         self,
         competicion: str,
