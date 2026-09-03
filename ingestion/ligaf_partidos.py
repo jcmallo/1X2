@@ -107,7 +107,7 @@ def descubrir_partidos(html: str) -> list[str]:
         href = str(a["href"])
         if "/partido/" not in href:
             continue
-        m = re.search(r"/(\d+)/(?:detalle|detail)(?:[/?#]|$)", href, re.I)
+        m = re.search(r"/(\d+)(?:/(?:detalle|detail))?(?:[/?#]|$)", href, re.I)
         if not m:
             continue
         encontrados[m.group(1)] = urljoin(BASE, href)
@@ -252,7 +252,7 @@ def parse_partido(url: str, html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     texto = soup.get_text(" ", strip=True)
 
-    mid = re.search(r"/(\d+)/(?:detalle|detail)(?:[/?#]|$)", url, re.I)
+    mid = re.search(r"/(\d+)(?:/(?:detalle|detail))?(?:[/?#]|$)", url, re.I)
     if not mid:
         raise RuntimeError("No pude obtener el ID oficial del partido.")
 
