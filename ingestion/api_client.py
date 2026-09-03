@@ -1,11 +1,9 @@
 """
-Cliente HTTPS/HTTP para el puente PHP alojado en IONOS.
+Cliente HTTP/HTTPS para el puente PHP alojado en IONOS.
 
-GitHub Actions NO se conecta directamente a MariaDB. Solo conoce:
+GitHub Actions no se conecta directamente a MariaDB. Solo conoce:
     INGEST_API_URL
     INGEST_API_TOKEN
-
-El PHP del hosting IONOS es el único que conoce las credenciales de MariaDB.
 """
 
 from __future__ import annotations
@@ -39,8 +37,8 @@ class ApiIngesta:
         if base_url.startswith("http://"):
             print(
                 "AVISO: INGEST_API_URL usa HTTP sin cifrar. "
-                "Funciona para la prueba actual, pero activa SSL/HTTPS en IONOS "
-                "cuanto antes porque el token viaja por la red."
+                "Activa SSL/HTTPS en IONOS cuanto antes porque el token "
+                "viaja por la red."
             )
 
         self.base_url = base_url + "/"
@@ -49,7 +47,7 @@ class ApiIngesta:
             {
                 "X-Ingest-Token": token,
                 "Accept": "application/json",
-                "User-Agent": "quiniela-1x2-github-actions/1.0",
+                "User-Agent": "quiniela-1x2-github-actions/1.1",
             }
         )
 
@@ -99,6 +97,41 @@ class ApiIngesta:
             raise RuntimeError("La API devolvió 'items' con formato inválido.")
         return items
 
+    def contexto_partidos(
+        self,
+        competicion: str,
+        temporada: str,
+        genero: str,
+        *,
+        retro_horas: int = 72,
+        futuro_dias: int = 21,
+        adelante_jornadas: int = 3,
+        reconciliar: bool = False,
+        ultimas_jornadas: int = 4,
+    ) -> dict:
+        params = {
+            "competicion": competicion,
+            "temporada": temporada,
+            "genero": genero,
+            "retro_horas": max(12, min(336, int(retro_horas))),
+            "futuro_dias": max(3, min(60, int(futuro_dias))),
+            "adelante_jornadas": max(1, min(6, int(adelante_jornadas))),
+            "reconciliar": "1" if reconciliar else "0",
+            "ultimas_jornadas": max(1, min(10, int(ultimas_jornadas))),
+        }
+        r = self.session.get(
+            self._url("contexto_partidos.php"),
+            params=params,
+            timeout=30,
+        )
+        data = self._json_o_error(r)
+        jornadas = data.get("jornadas")
+        if not isinstance(jornadas, list):
+            raise RuntimeError(
+                "La API devolvió 'jornadas' con formato inválido."
+            )
+        return data
+
     def iniciar_lote(
         self,
         fuente: str = "open-meteo",
@@ -127,7 +160,6 @@ class ApiIngesta:
             timeout=45,
         )
         return self._json_o_error(r)
-
 
     def guardar_documento(self, payload: dict) -> dict:
         r = self.session.post(

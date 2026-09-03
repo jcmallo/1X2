@@ -1,19 +1,16 @@
 """
-Ingesta incremental de partidos de Liga F desde la web oficial ligaf.es.
+Ingesta automática e idempotente de partidos de Liga F desde ligaf.es.
 
-Primera puesta en marcha:
-    jornadas 1 y 2 de la temporada 2026-27.
+Modos:
+- auto: revisa únicamente partidos recientes/próximos y descubre las
+  siguientes jornadas todavía no cargadas.
+- reconciliar: igual que auto, añadiendo unas pocas jornadas recientes.
+- completo: recorre las 30 jornadas; pensado solo para backfill manual.
+- LIGAF_JORNADAS="1,2,3": fuerza jornadas concretas.
 
-Guarda:
-- HTML RAW de las páginas de resultados y de cada ficha de partido.
-- competición/temporada si faltan.
-- equipos FEMENINOS separados de los masculinos aunque compartan nombre.
-- estadio cuando la ficha lo publica.
-- partido + resultado/estado.
-- IDs externos de equipos y partidos para que las siguientes ejecuciones
-  actualicen y NO dupliquen.
-
-No carga todavía alineaciones/estadísticas/eventos: eso será el siguiente bloque.
+El modo auto consulta a MariaDB a través de contexto_partidos.php. Así GitHub
+Actions no necesita conocer el estado de la temporada ni recorrer siempre
+todo el histórico.
 """
 
 from __future__ import annotations
@@ -83,8 +80,7 @@ def get_con_reintentos(session: requests.Session, url: str) -> requests.Response
     raise RuntimeError(f"No se pudo descargar {url}: {ultimo}")
 
 
-def jornadas_configuradas() -> list[int]:
-    raw = os.environ.get("LIGAF_JORNADAS", "1,2").strip()
+def _jornadas_desde_texto(raw: str) -> list[int]:
     resultado = []
     for parte in raw.split(","):
         parte = parte.strip()
@@ -95,8 +91,55 @@ def jornadas_configuradas() -> list[int]:
             raise RuntimeError("Las jornadas deben estar entre 1 y 30.")
         resultado.append(n)
     if not resultado:
-        raise RuntimeError("LIGAF_JORNADAS está vacío.")
+        raise RuntimeError("La lista de jornadas está vacía.")
     return sorted(set(resultado))
+
+
+def jornadas_configuradas(api: ApiIngesta) -> tuple[list[int], str]:
+    # Una lista explícita siempre gana. Sirve para depuración o backfills
+    # puntuales sin tocar el código.
+    raw = os.environ.get("LIGAF_JORNADAS", "").strip()
+    if raw:
+        return _jornadas_desde_texto(raw), "manual"
+
+    modo = os.environ.get("LIGAF_MODO", "auto").strip().lower()
+
+    if modo == "completo":
+        return list(range(1, 31)), "completo"
+
+    if modo not in {"auto", "reconciliar"}:
+        raise RuntimeError(
+            "LIGAF_MODO debe ser auto, reconciliar o completo."
+        )
+
+    contexto = api.contexto_partidos(
+        competicion="Liga F",
+        temporada=TEMPORADA,
+        genero="FEMENINO",
+        retro_horas=int(os.environ.get("LIGAF_RETRO_HORAS", "72")),
+        futuro_dias=int(os.environ.get("LIGAF_FUTURO_DIAS", "21")),
+        adelante_jornadas=int(
+            os.environ.get("LIGAF_ADELANTE_JORNADAS", "3")
+        ),
+        reconciliar=(modo == "reconciliar"),
+        ultimas_jornadas=int(
+            os.environ.get("LIGAF_ULTIMAS_JORNADAS", "4")
+        ),
+    )
+
+    jornadas = [int(j) for j in contexto.get("jornadas", [])]
+    jornadas = sorted(set(j for j in jornadas if 1 <= j <= 30))
+    if not jornadas:
+        # No debería ocurrir, pero preferimos una pequeña revisión segura
+        # a terminar sin hacer nada por un contexto inesperado.
+        jornadas = [1, 2, 3]
+
+    print(
+        "Contexto automático -> "
+        f"max_cargada={contexto.get('max_jornada_cargada')}, "
+        f"jornadas={jornadas}"
+    )
+    return jornadas, modo
 
 
 def descubrir_partidos(html: str) -> list[str]:
@@ -299,13 +342,14 @@ def main() -> None:
         health.get("db_version"),
     )
 
-    jornadas = jornadas_configuradas()
+    jornadas, modo = jornadas_configuradas(api)
+    print("Modo:", modo)
     print("Jornadas a procesar:", jornadas)
 
     lote = api.iniciar_lote(
         fuente=FUENTE,
         tipo_fuente="scraping",
-        notas=f"Liga F {TEMPORADA}; jornadas {jornadas}",
+        notas=f"Liga F {TEMPORADA}; modo={modo}; jornadas={jornadas}",
     )
     print("Lote abierto:", lote)
 
