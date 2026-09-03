@@ -1,0 +1,78 @@
+name: Actualizar Primera y Segunda
+
+on:
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "Modo de ejecución"
+        required: true
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - reconciliar
+          - completo
+
+  # Dos veces al día. Cron usa UTC.
+  schedule:
+    - cron: "27 5,17 * * *"
+
+    # Reconciliación semanal de jornadas recientes.
+    - cron: "57 4 * * 1"
+
+concurrency:
+  group: primera-segunda
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  partidos:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        division:
+          - primera
+          - segunda
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v7
+
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Determinar modo
+        id: modo
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "modo=${{ inputs.modo }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event.schedule }}" == "57 4 * * 1" ]]; then
+            echo "modo=reconciliar" >> "$GITHUB_OUTPUT"
+          else
+            echo "modo=auto" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Actualizar ${{ matrix.division }}
+        working-directory: ingestion
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+          LALIGA_DIVISION: ${{ matrix.division }}
+          LALIGA_MODO: ${{ steps.modo.outputs.modo }}
+          LALIGA_RETRO_HORAS: "72"
+          LALIGA_FUTURO_DIAS: "21"
+          LALIGA_ADELANTE_JORNADAS: "3"
+          LALIGA_ULTIMAS_JORNADAS: "4"
+        run: python laliga_partidos.py
