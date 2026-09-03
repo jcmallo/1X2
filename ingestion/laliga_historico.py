@@ -74,6 +74,25 @@ PATRON_MARCADOR = re.compile(r"\b(\d{1,2})\s*-\s*(\d{1,2})\b")
 PATRON_CLUB = re.compile(r"/clubes/([^/?#]+)", re.I)
 
 
+# Excepción documentada: LaLiga conserva resultados/fechas de la J30 2025-26,
+# pero actualmente muestra "-- : --" en la columna HORARIO. Para no inventar
+# horas ni perder la jornada, se usan los horarios reales verificados.
+HORARIOS_FALLBACK: dict[tuple[str, str, int], dict[tuple[str, str], str]] = {
+    ("2025-26", "primera", 30): {
+        ("rayo vallecano", "elche cf"): "21:00",
+        ("real sociedad", "levante ud"): "14:00",
+        ("rcd mallorca", "real madrid"): "16:15",
+        ("real betis", "rcd espanyol de barcelona"): "18:30",
+        ("atletico de madrid", "fc barcelona"): "21:00",
+        ("getafe cf", "athletic club"): "14:00",
+        ("valencia cf", "celta"): "16:15",
+        ("real oviedo", "sevilla fc"): "18:30",
+        ("deportivo alaves", "ca osasuna"): "21:00",
+        ("girona fc", "villarreal cf"): "21:00",
+    }
+}
+
+
 @dataclass(frozen=True)
 class PartidoJornada:
     jornada: int
@@ -84,6 +103,7 @@ class PartidoJornada:
     visitante_slug: str
     goles_local: int
     goles_visitante: int
+    hora_origen: str
     fragmento: str
 
 
@@ -181,7 +201,7 @@ def clubes_unicos(contenedor: Tag) -> list[tuple[str, str]]:
     return salida
 
 
-def contenedor_partido(a: Tag) -> Tag | None:
+def contenedor_partido(a: Tag, *, permitir_sin_hora: bool = False) -> Tag | None:
     """Devuelve el ancestro más pequeño que contiene una fila de partido."""
     mejor: Tag | None = None
     for ancestro in a.parents:
@@ -190,7 +210,7 @@ def contenedor_partido(a: Tag) -> Tag | None:
         texto = " ".join(ancestro.stripped_strings)
         if not PATRON_FECHA.search(texto):
             continue
-        if not PATRON_HORA.search(texto):
+        if not permitir_sin_hora and not PATRON_HORA.search(texto):
             continue
         if not PATRON_MARCADOR.search(texto):
             continue
@@ -202,20 +222,36 @@ def contenedor_partido(a: Tag) -> Tag | None:
     return mejor
 
 
-def parsear_contenedor(contenedor: Tag, jornada: int) -> PartidoJornada:
+def parsear_contenedor(
+    contenedor: Tag,
+    jornada: int,
+    horarios_fallback: dict[tuple[str, str], str] | None = None,
+) -> PartidoJornada:
     texto = " ".join(contenedor.stripped_strings)
     mf = PATRON_FECHA.search(texto)
     mh = PATRON_HORA.search(texto)
     mm = PATRON_MARCADOR.search(texto)
     clubes = clubes_unicos(contenedor)
 
-    if not mf or not mh or not mm or len(clubes) < 2:
+    if not mf or not mm or len(clubes) < 2:
         raise RuntimeError("Fila histórica incompleta.")
 
     # En el ancestro mínimo, los dos primeros clubes únicos son local/visitante.
     (local, local_slug), (visitante, visitante_slug) = clubes[:2]
     dia, mes, anio = int(mf.group(1)), int(mf.group(2)), int(mf.group(3))
-    hora, minuto = int(mh.group(1)), int(mh.group(2))
+
+    hora_origen = "pagina_laliga"
+    if mh:
+        hora, minuto = int(mh.group(1)), int(mh.group(2))
+    else:
+        clave = (simplificar(local), simplificar(visitante))
+        hhmm = (horarios_fallback or {}).get(clave)
+        if not hhmm:
+            raise RuntimeError(
+                f"Horario no disponible para {local}-{visitante} y sin fallback verificado."
+            )
+        hora, minuto = map(int, hhmm.split(":", 1))
+        hora_origen = "fallback_verificado"
 
     return PartidoJornada(
         jornada=jornada,
@@ -226,23 +262,29 @@ def parsear_contenedor(contenedor: Tag, jornada: int) -> PartidoJornada:
         visitante_slug=visitante_slug,
         goles_local=int(mm.group(1)),
         goles_visitante=int(mm.group(2)),
+        hora_origen=hora_origen,
         fragmento=texto[:5000],
     )
 
 
-def extraer_partidos(html: str, jornada: int) -> list[PartidoJornada]:
+def extraer_partidos(
+    html: str,
+    jornada: int,
+    horarios_fallback: dict[tuple[str, str], str] | None = None,
+) -> list[PartidoJornada]:
     soup = BeautifulSoup(html, "html.parser")
     encontrados: dict[tuple[str, str], PartidoJornada] = {}
+    permitir_sin_hora = bool(horarios_fallback)
 
     for a in soup.find_all("a", href=True):
         info = club_info(a)
         if not info:
             continue
-        cont = contenedor_partido(a)
+        cont = contenedor_partido(a, permitir_sin_hora=permitir_sin_hora)
         if cont is None:
             continue
         try:
-            p = parsear_contenedor(cont, jornada)
+            p = parsear_contenedor(cont, jornada, horarios_fallback)
         except RuntimeError:
             continue
         encontrados[(p.local_slug, p.visitante_slug)] = p
@@ -282,6 +324,7 @@ def payload_partido(
             "visitante": p.visitante,
             "goles_local": p.goles_local,
             "goles_visitante": p.goles_visitante,
+            "hora_origen": p.hora_origen,
             "fragmento_texto": p.fragmento,
         },
         ensure_ascii=False,
@@ -336,6 +379,9 @@ def main() -> None:
     cfg = DIVISIONES[args.division]
     jornadas = jornadas_desde_texto(args.jornadas, cfg["numero_jornadas"])
 
+    def fallback_jornada(j: int) -> dict[tuple[str, str], str] | None:
+        return HORARIOS_FALLBACK.get((args.temporada, args.division, j))
+
     session = requests.Session()
     session.headers.update(HEADERS)
 
@@ -349,7 +395,7 @@ def main() -> None:
 
     # La fecha real de inicio se obtiene de J1; no se inventa un 1 de agosto.
     url_j1, html_j1 = descargar_jornada(1)
-    partidos_j1 = extraer_partidos(html_j1, 1)
+    partidos_j1 = extraer_partidos(html_j1, 1, fallback_jornada(1))
     if len(partidos_j1) != cfg["partidos_jornada"]:
         raise RuntimeError(
             f"J1 {args.temporada} {args.division}: esperaba "
@@ -364,7 +410,7 @@ def main() -> None:
         )
         for j in jornadas:
             url, html = descargar_jornada(j)
-            partidos = extraer_partidos(html, j)
+            partidos = extraer_partidos(html, j, fallback_jornada(j))
             print(f"J{j:02d}: {len(partidos)} partidos -> {url}")
             if len(partidos) != cfg["partidos_jornada"]:
                 raise RuntimeError(
@@ -404,7 +450,7 @@ def main() -> None:
                 }
             )
 
-            partidos = extraer_partidos(html, j)
+            partidos = extraer_partidos(html, j, fallback_jornada(j))
             print("  partidos extraídos:", len(partidos))
             if len(partidos) != cfg["partidos_jornada"]:
                 raise RuntimeError(
