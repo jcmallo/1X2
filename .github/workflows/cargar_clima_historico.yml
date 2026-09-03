@@ -1,0 +1,37 @@
+name: Cargar clima histórico partidos
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: clima-historico-partidos
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  historico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v7
+
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Cargar histórico meteorológico por partido
+        working-directory: ingestion
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+          CLIMA_HISTORICO_LIMITE: "500"
+        run: python clima_historico.py
