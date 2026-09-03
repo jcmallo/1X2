@@ -154,10 +154,31 @@ def puntuar(
 
     clase = normalizar(candidato.get("class"))
     tipo = normalizar(candidato.get("type"))
+    categoria = normalizar(candidato.get("category"))
 
-    if tipo in {"stadium", "sports centre", "pitch"}:
+    # Un nombre exacto no basta: "Fernando Torres", "Jesús Navas" o
+    # "Anoeta" pueden ser calles, personas o municipios. Para un estadio
+    # exigimos que Nominatim lo clasifique como recinto/instalación deportiva.
+    es_deportivo = (
+        tipo in {
+            "stadium",
+            "sports centre",
+            "sports_centre",
+            "pitch",
+            "track",
+        }
+        or clase in {"leisure", "sport"}
+        or categoria in {"leisure", "sport"}
+    )
+
+    if not es_deportivo:
+        return -100
+
+    if tipo == "stadium":
+        score += 6
+    elif tipo in {"sports centre", "sports_centre", "pitch", "track"}:
         score += 4
-    elif clase == "leisure":
+    else:
         score += 2
 
     if ciudad and normalizar(ciudad) in display:
@@ -274,7 +295,7 @@ def buscar_estadio(item: dict) -> dict | None:
 
         # Umbral prudente: si no estamos razonablemente seguros,
         # preferimos dejar las coordenadas pendientes.
-        if score < 6:
+        if score < 8:
             continue
 
         return {
