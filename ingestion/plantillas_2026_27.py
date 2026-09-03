@@ -739,7 +739,7 @@ def procesar_laliga(
                 lote_id,
                 "laliga.com-apim",
                 raw_url,
-                "jugadores_estadisticas_laliga_json",
+                "jugadores_laliga_json",
                 json.dumps(
                     raw_data,
                     ensure_ascii=False,
