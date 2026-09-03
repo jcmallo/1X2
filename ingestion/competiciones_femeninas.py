@@ -646,14 +646,46 @@ def id_estable(p: Partido, temporada: str) -> str:
     return hashlib.sha256(semilla.encode("utf-8")).hexdigest()[:48]
 
 
-def clave_semantica(p: Partido) -> tuple[str, str, str, str, bool]:
-    return (
+def clave_semantica(p: Partido) -> tuple:
+    """
+    Identidad lógica para deduplicar ANTES de escribir.
+
+    Problema que corrige:
+    SoccerDonna y el fallback UEFA pueden llamar al mismo rival de forma
+    distinta ("Ajax" / "Ajax Amsterdam", "Chelsea" / "Chelsea FC").
+    Si usamos los nombres como clave, el mismo encuentro pasa dos veces.
+
+    Para partidos con un solo equipo de nuestro universo, competición +
+    fecha + lado + equipo_id identifican inequívocamente el encuentro:
+    un club no juega dos partidos de la misma competición el mismo día.
+
+    Si ambos equipos son seguidos, usamos ambos IDs y sus lados.
+
+    IMPORTANTE: no cambiamos id_estable() de los registros persistidos.
+    Así un rerun actualiza una de las filas ya existentes y no crea un
+    tercer ID distinto mientras limpiamos los duplicados antiguos.
+    """
+    base = (
         p.competicion,
         p.fecha_sql[:10],
-        norm(p.local),
-        norm(p.visitante),
         p.es_clasificatoria,
     )
+
+    if p.equipo_local_id is not None and p.equipo_visitante_id is not None:
+        return base + (
+            "AMBOS",
+            int(p.equipo_local_id),
+            int(p.equipo_visitante_id),
+        )
+
+    if p.equipo_local_id is not None:
+        return base + ("LOCAL_SEGUIDO", int(p.equipo_local_id))
+
+    if p.equipo_visitante_id is not None:
+        return base + ("VISITANTE_SEGUIDO", int(p.equipo_visitante_id))
+
+    # No debería llegar aquí: el preflight prohíbe partidos sin equipo seguido.
+    return base + ("SIN_EQUIPO", norm(p.local), norm(p.visitante))
 
 
 def calidad(p: Partido) -> tuple[int, int]:
@@ -847,7 +879,14 @@ def preflight_temporada(
                 )
                 partidos.extend(fb)
 
+    antes_dedupe = len(partidos)
     partidos = deduplicar(partidos)
+    eliminados_dedupe = antes_dedupe - len(partidos)
+    if eliminados_dedupe:
+        print(
+            f"  deduplicación semántica: {eliminados_dedupe} fila(s) "
+            "equivalentes colapsadas antes de escribir"
+        )
 
     # Protección definitiva: nunca mandar a la API un partido no relacionado.
     for p in partidos:
