@@ -167,6 +167,32 @@ class ApiIngesta:
             timeout=60,
         )
 
+    def contexto_plantillas(
+        self,
+        temporada: str = "2026-27",
+    ) -> list[dict]:
+        data = self._request_json(
+            "GET",
+            "contexto_plantillas.php",
+            params={"temporada": temporada},
+            timeout=45,
+        )
+        items = data.get("items", [])
+        if not isinstance(items, list):
+            raise RuntimeError(
+                "La API devolvió 'items' de plantillas "
+                "con formato inválido."
+            )
+        return items
+
+    def guardar_plantilla(self, payload: dict) -> dict:
+        return self._request_json(
+            "POST",
+            "guardar_plantilla.php",
+            json=payload,
+            timeout=90,
+        )
+
     def contexto_partidos(
         self,
         competicion: str,
