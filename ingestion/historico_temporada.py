@@ -33,7 +33,11 @@ import requests
 from api_client import ApiIngesta
 
 
-SOFASCORE = "https://www.sofascore.com/api/v1"
+SOFASCORE_DIRECTOS = [
+    "https://api.sofascore.com/api/v1",
+    "https://www.sofascore.com/api/v1",
+]
+SOFASCORE_CANONICO = "https://www.sofascore.com/api/v1"
 
 BASE_TOURNAMENTS = {
     "MASCULINO": [
@@ -77,26 +81,75 @@ POSICIONES = {
 
 
 class Sofascore:
-    def __init__(self) -> None:
+    """
+    GitHub-hosted runners pueden recibir 403 de Sofascore aunque el endpoint
+    sea público. Estrategia:
+      1. probar api.sofascore.com y www.sofascore.com directamente;
+      2. ante 403/401/bloqueo de red, usar el proxy autenticado de IONOS.
+
+    Así no dependemos de la reputación/IP del runner de GitHub.
+    """
+
+    def __init__(self, api: ApiIngesta) -> None:
+        self.api = api
         self.s = requests.Session()
         self.s.headers.update(
             {
                 "User-Agent": (
-                    "Mozilla/5.0 (compatible; Quiniela1X2/1.0; "
-                    "+https://1x2.juancarlosmallo.com)"
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/150.0 Safari/537.36"
                 ),
                 "Accept": "application/json,text/plain,*/*",
-                "Accept-Language": "es-ES,es;q=0.9",
+                "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+                "Referer": "https://www.sofascore.com/",
+                "Origin": "https://www.sofascore.com",
             }
         )
+        self.usar_proxy = False
+        self._proxy_anunciado = False
+
+    def _proxy(self, path: str, *, aceptar_404: bool) -> dict | None:
+        if not self._proxy_anunciado:
+            print(
+                "      Sofascore directo bloqueado; "
+                "continuando mediante IONOS..."
+            )
+            self._proxy_anunciado = True
+
+        data = self.api._request_json(
+            "GET",
+            "sofascore_proxy.php",
+            params={"path": path},
+            timeout=60,
+        )
+
+        status = int(data.get("upstream_status") or 0)
+        if status == 404 and aceptar_404:
+            return None
+        if status != 200:
+            raise RuntimeError(
+                f"Proxy Sofascore devolvió upstream_status={status}"
+            )
+
+        payload = data.get("data")
+        if not isinstance(payload, dict):
+            raise RuntimeError("Proxy Sofascore devolvió JSON inválido.")
+
+        return payload
 
     def get(self, path: str, *, aceptar_404: bool = False) -> dict | None:
-        url = path if path.startswith("http") else SOFASCORE + path
-        ultimo: Exception | None = None
+        if self.usar_proxy:
+            return self._proxy(path, aceptar_404=aceptar_404)
 
-        for intento in range(1, 6):
+        ultimo: Exception | None = None
+        bloqueado = False
+
+        for base in SOFASCORE_DIRECTOS:
+            url = path if path.startswith("http") else base + path
+
             try:
-                r = self.s.get(url, timeout=(10, 45))
+                r = self.s.get(url, timeout=(10, 35))
 
                 if r.status_code == 404 and aceptar_404:
                     return None
@@ -107,15 +160,20 @@ class Sofascore:
                         return data
                     raise RuntimeError("JSON no es un objeto.")
 
+                # No perder 1-2 minutos reintentando un 403 del runner:
+                # cambiar inmediatamente de ruta de red.
+                if r.status_code in {401, 403}:
+                    bloqueado = True
+                    ultimo = RuntimeError(
+                        f"HTTP {r.status_code} en {base}"
+                    )
+                    continue
+
                 if r.status_code in {429, 500, 502, 503, 504}:
-                    if intento < 5:
-                        espera = min(20, 2 ** intento)
-                        print(
-                            f"      Sofascore HTTP {r.status_code}; "
-                            f"reintento en {espera}s"
-                        )
-                        time.sleep(espera)
-                        continue
+                    ultimo = RuntimeError(
+                        f"HTTP {r.status_code} en {base}"
+                    )
+                    continue
 
                 raise RuntimeError(
                     f"Sofascore HTTP {r.status_code}: {r.text[:200]}"
@@ -125,14 +183,13 @@ class Sofascore:
                 requests.Timeout,
                 requests.ConnectionError,
                 requests.JSONDecodeError,
-                RuntimeError,
             ) as exc:
                 ultimo = exc
-                if intento < 5:
-                    time.sleep(min(20, 2 ** intento))
-                    continue
+                continue
 
-        raise RuntimeError(f"No se pudo descargar {url}: {ultimo}")
+        # Si los dos hosts directos fallan, IONOS es el camino estable.
+        self.usar_proxy = True
+        return self._proxy(path, aceptar_404=aceptar_404)
 
 
 def parse_temporada(etiqueta: str) -> tuple[int, int]:
@@ -876,7 +933,7 @@ def payload_partido(
         "hubo_prorroga": hubo_prorroga,
         "hubo_penaltis": hubo_penaltis,
         "estadio_nombre": nombre_estadio(evento),
-        "documento_url": f"{SOFASCORE}/event/{event_id}",
+        "documento_url": f"{SOFASCORE_CANONICO}/event/{event_id}",
         "contenido_raw": json.dumps(
             evento,
             ensure_ascii=False,
@@ -914,7 +971,7 @@ def main() -> None:
     )
 
     api = ApiIngesta()
-    sf = Sofascore()
+    sf = Sofascore(api)
 
     health = api.health()
     print(
@@ -926,15 +983,9 @@ def main() -> None:
     ya = api.contexto_historico_estado(temporada)
     print(f"Partidos Sofascore ya conocidos en {temporada}: {len(ya)}")
 
-    lote_id = api.iniciar_lote(
-        fuente=f"sofascore-historico-{temporada}",
-        tipo_fuente="api",
-        notas=(
-            f"Histórico completo por equipos {temporada}: "
-            "competiciones oficiales, partidos, alineaciones, minutos y stats."
-        ),
-    )
-    print("Lote abierto:", lote_id)
+    # El lote se abre DESPUÉS del descubrimiento. Así un bloqueo externo
+    # (403, DNS, etc.) no deja lotes abiertos sin haber guardado ningún dato.
+    lote_id: int | None = None
 
     target_ids: dict[str, set[int]] = {
         "MASCULINO": set(),
@@ -1047,6 +1098,16 @@ def main() -> None:
         f"de {temporada}..."
     )
 
+    lote_id = api.iniciar_lote(
+        fuente=f"sofascore-historico-{temporada}",
+        tipo_fuente="api",
+        notas=(
+            f"Histórico completo por equipos {temporada}: "
+            "competiciones oficiales, partidos, alineaciones, minutos y stats."
+        ),
+    )
+    print("Lote abierto:", lote_id)
+
     partidos_ok = 0
     detalles_ok = 0
     detalles_omitidos = 0
@@ -1127,14 +1188,14 @@ def main() -> None:
                 "fecha_partido": fecha_local_madrid(int(ts(evento))),
                 "jugadores": jugadores,
                 "equipos_stats": equipos_stats,
-                "url_lineups": f"{SOFASCORE}/event/{event_id}/lineups"
+                "url_lineups": f"{SOFASCORE_CANONICO}/event/{event_id}/lineups"
                 if lineups is not None else None,
                 "raw_lineups": json.dumps(
                     lineups,
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ) if lineups is not None else None,
-                "url_statistics": f"{SOFASCORE}/event/{event_id}/statistics"
+                "url_statistics": f"{SOFASCORE_CANONICO}/event/{event_id}/statistics"
                 if statistics is not None else None,
                 "raw_statistics": json.dumps(
                     statistics,
