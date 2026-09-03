@@ -128,6 +128,23 @@ class ApiIngesta:
         )
         return self._json_o_error(r)
 
+
+    def guardar_documento(self, payload: dict) -> dict:
+        r = self.session.post(
+            self._url("guardar_documento.php"),
+            json=payload,
+            timeout=60,
+        )
+        return self._json_o_error(r)
+
+    def guardar_partido(self, payload: dict) -> dict:
+        r = self.session.post(
+            self._url("guardar_partido.php"),
+            json=payload,
+            timeout=60,
+        )
+        return self._json_o_error(r)
+
     def finalizar_lote(
         self,
         lote_id: int,
