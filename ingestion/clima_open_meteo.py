@@ -1,181 +1,292 @@
 """
-Ingesta de clima (Open-Meteo) para los estadios ya cargados en nucleo_estadios.
+Ingestor de previsión meteorológica para Quiniela 1X2.
 
-Qué hace, paso a paso:
-  1. Abre un "lote de ingesta" en bruto_lotes_ingesta (trazabilidad de esta ejecución).
-  2. Para cada estadio con latitud/longitud, pide a Open-Meteo la previsión
-     horaria de los próximos días.
-  3. Guarda la respuesta CRUDA tal cual en bruto_respuestas_api (capa RAW,
-     nunca se borra ni se modifica).
-  4. Extrae el punto horario más cercano a "ahora + 24h" (el horizonte
-     T-24h que usamos en todo el proyecto para evitar fuga de datos) y
-     lo guarda en clima_previsiones, enlazado a la respuesta cruda de la
-     que salió.
+Arquitectura:
+    GitHub Actions (Python)
+        -> Open-Meteo
+        -> API PHP privada en IONOS
+        -> MariaDB
 
-No necesita ninguna clave de API (Open-Meteo es gratuito y abierto).
+GitHub NO conoce las credenciales de MariaDB.
 
-Uso:
-    python ingestion/clima_open_meteo.py
+MODOS
+-----
+CLIMA_MODO=estadios  (por defecto, para la primera prueba)
+    Procesa todos los estadios con coordenadas y guarda una previsión
+    para ahora + 24 horas, sin asociarla a partido_id.
+
+CLIMA_MODO=proximos
+    Procesa partidos PROGRAMADOS de los próximos CLIMA_DIAS días.
+    La previsión se toma para la hora real de inicio del partido y
+    horas_antelacion se calcula respecto al momento de la consulta.
+
+Una vez comprobado el circuito completo, el modo recomendado para producción
+es "proximos".
 """
 
-import hashlib
+from __future__ import annotations
+
 import json
+import os
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
-from db import obtener_conexion
+from api_client import ApiIngesta
+
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
-HORAS_OBJETIVO = 24  # horizonte T-24h
+ZONA_PARTIDOS = ZoneInfo("Europe/Madrid")
 
 
-def obtener_estadios(conexion):
-    with conexion.cursor() as cur:
-        cur.execute(
-            """
-            SELECT estadio_id, nombre, latitud, longitud
-            FROM nucleo_estadios
-            WHERE latitud IS NOT NULL AND longitud IS NOT NULL
-            """
-        )
-        return cur.fetchall()
+def utc_naive(dt: datetime) -> str:
+    """Devuelve YYYY-mm-dd HH:MM:SS en UTC, sin offset, para el esquema DATETIME."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def pedir_prevision(latitud, longitud):
-    """Llama a Open-Meteo y devuelve (payload_texto, json_parseado)."""
+def interpretar_inicio_partido(fecha_hora_inicio: str) -> datetime:
+    """
+    nucleo_partidos.fecha_hora_inicio es DATETIME sin zona.
+    Para competiciones españolas actuales lo interpretamos como Europe/Madrid
+    y lo convertimos a UTC para compararlo con Open-Meteo (timezone=UTC).
+    """
+    dt_local = datetime.fromisoformat(fecha_hora_inicio)
+    if dt_local.tzinfo is None:
+        dt_local = dt_local.replace(tzinfo=ZONA_PARTIDOS)
+    return dt_local.astimezone(timezone.utc)
+
+
+def pedir_prevision(latitud: float, longitud: float) -> tuple[str, dict, dict]:
     parametros = {
-        "latitude": latitud,
-        "longitude": longitud,
-        "hourly": "temperature_2m,precipitation,precipitation_probability,"
-                  "wind_speed_10m,wind_gusts_10m,relative_humidity_2m,"
-                  "surface_pressure,cloud_cover,visibility",
-        "forecast_days": 3,
+        "latitude": float(latitud),
+        "longitude": float(longitud),
+        "hourly": (
+            "temperature_2m,apparent_temperature,precipitation,"
+            "precipitation_probability,snowfall,wind_speed_10m,"
+            "wind_gusts_10m,relative_humidity_2m,surface_pressure,"
+            "cloud_cover,visibility"
+        ),
+        "forecast_days": 14,
         "timezone": "UTC",
     }
-    respuesta = requests.get(OPEN_METEO_URL, params=parametros, timeout=15)
+
+    respuesta = requests.get(
+        OPEN_METEO_URL,
+        params=parametros,
+        timeout=25,
+        headers={"User-Agent": "quiniela-1x2-ingestor/1.0"},
+    )
     respuesta.raise_for_status()
-    return respuesta.text, respuesta.json()
+    return respuesta.text, respuesta.json(), parametros
 
 
-def punto_horario_mas_cercano(datos_horarios, objetivo_dt):
-    """De la lista horaria de Open-Meteo, devuelve el índice cuya hora
-    está más cerca de objetivo_dt (todo en UTC)."""
-    horas = datos_horarios["time"]  # lista de strings ISO, p.ej. '2026-09-04T18:00'
+def punto_horario_mas_cercano(datos_horarios: dict, objetivo_utc: datetime) -> int:
+    horas = datos_horarios.get("time")
+    if not horas:
+        raise RuntimeError("Open-Meteo no devolvió horas en hourly.time")
+
     mejor_indice = 0
     mejor_diferencia = None
+
     for i, hora_str in enumerate(horas):
         hora_dt = datetime.fromisoformat(hora_str).replace(tzinfo=timezone.utc)
-        diferencia = abs((hora_dt - objetivo_dt).total_seconds())
+        diferencia = abs((hora_dt - objetivo_utc).total_seconds())
         if mejor_diferencia is None or diferencia < mejor_diferencia:
             mejor_diferencia = diferencia
             mejor_indice = i
+
     return mejor_indice
 
 
-def procesar_estadio(conexion, lote_id, estadio, ahora):
-    estadio_id = estadio["estadio_id"]
-    nombre = estadio["nombre"]
-    print(f"  - {nombre} (estadio_id={estadio_id})")
-
-    payload_texto, datos = pedir_prevision(estadio["latitud"], estadio["longitud"])
-    hash_payload = hashlib.sha256(payload_texto.encode("utf-8")).hexdigest()
-
-    with conexion.cursor() as cur:
-        # 1) Guardar la respuesta cruda (capa RAW)
-        cur.execute(
-            """
-            INSERT INTO bruto_respuestas_api
-                (lote_id, fuente, endpoint, parametros_solicitud, solicitado_en,
-                 respondido_en, codigo_http, payload, hash_payload)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                lote_id,
-                "open-meteo",
-                OPEN_METEO_URL,
-                json.dumps({"latitude": float(estadio["latitud"]), "longitude": float(estadio["longitud"])}),
-                ahora,
-                datetime.now(timezone.utc).replace(tzinfo=None),
-                200,
-                payload_texto,
-                hash_payload,
-            ),
-        )
-        respuesta_id = cur.lastrowid
-
-        # 2) Extraer el punto horario en el horizonte T-24h y guardarlo en CLEAN
-        objetivo = ahora.replace(tzinfo=timezone.utc) + timedelta(hours=HORAS_OBJETIVO)
-        horario = datos["hourly"]
-        idx = punto_horario_mas_cercano(horario, objetivo)
-
-        cur.execute(
-            """
-            INSERT INTO clima_previsiones
-                (estadio_id, partido_id, prevision_generada_en, prevista_para,
-                 horas_antelacion, temperatura_c, lluvia_mm, probabilidad_lluvia_pct,
-                 humedad_pct, velocidad_viento_kmh, rachas_viento_kmh, presion_hpa,
-                 nubosidad_pct, visibilidad_km, fuente, origen_respuesta_id)
-            VALUES (%s, NULL, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                estadio_id,
-                ahora,
-                horario["time"][idx],
-                HORAS_OBJETIVO,
-                horario["temperature_2m"][idx],
-                horario["precipitation"][idx],
-                horario["precipitation_probability"][idx],
-                horario["relative_humidity_2m"][idx],
-                horario["wind_speed_10m"][idx],
-                horario["wind_gusts_10m"][idx],
-                horario["surface_pressure"][idx],
-                horario["cloud_cover"][idx],
-                (horario["visibility"][idx] / 1000.0) if horario.get("visibility") else None,
-                "open-meteo",
-                respuesta_id,
-            ),
-        )
+def valor(horario: dict, clave: str, idx: int):
+    lista = horario.get(clave)
+    if not isinstance(lista, list) or idx >= len(lista):
+        return None
+    return lista[idx]
 
 
-def main():
-    ahora = datetime.now(timezone.utc).replace(tzinfo=None)
-    conexion = obtener_conexion()
+def construir_payload_guardado(
+    *,
+    lote_id: int,
+    item: dict,
+    ahora_utc: datetime,
+    objetivo_utc: datetime,
+    payload_texto: str,
+    datos: dict,
+    parametros: dict,
+) -> dict:
+    horario = datos.get("hourly")
+    if not isinstance(horario, dict):
+        raise RuntimeError("Open-Meteo no devolvió un objeto 'hourly' válido.")
+
+    idx = punto_horario_mas_cercano(horario, objetivo_utc)
+    prevista_str = horario["time"][idx]
+    prevista_utc = datetime.fromisoformat(prevista_str).replace(tzinfo=timezone.utc)
+
+    # Diferencia real entre el momento de consulta y el instante previsto.
+    horas_antelacion = max(
+        0,
+        int(round((prevista_utc - ahora_utc).total_seconds() / 3600)),
+    )
+
+    visibilidad_m = valor(horario, "visibility", idx)
+
+    return {
+        "lote_id": lote_id,
+        "estadio_id": int(item["estadio_id"]),
+        "partido_id": (
+            int(item["partido_id"])
+            if item.get("partido_id") not in (None, "")
+            else None
+        ),
+        "prevision_generada_en": utc_naive(ahora_utc),
+        "prevista_para": utc_naive(prevista_utc),
+        "horas_antelacion": horas_antelacion,
+        "temperatura_c": valor(horario, "temperature_2m", idx),
+        "sensacion_termica_c": valor(horario, "apparent_temperature", idx),
+        "lluvia_mm": valor(horario, "precipitation", idx),
+        "probabilidad_lluvia_pct": valor(
+            horario, "precipitation_probability", idx
+        ),
+        "humedad_pct": valor(horario, "relative_humidity_2m", idx),
+        "velocidad_viento_kmh": valor(horario, "wind_speed_10m", idx),
+        "rachas_viento_kmh": valor(horario, "wind_gusts_10m", idx),
+        "presion_hpa": valor(horario, "surface_pressure", idx),
+        "nubosidad_pct": valor(horario, "cloud_cover", idx),
+        "visibilidad_km": (
+            float(visibilidad_m) / 1000.0
+            if visibilidad_m is not None
+            else None
+        ),
+        "nieve_mm": valor(horario, "snowfall", idx),
+        "fuente": "open-meteo",
+        "endpoint": OPEN_METEO_URL,
+        "parametros_solicitud": parametros,
+        "solicitado_en": utc_naive(ahora_utc),
+        "respondido_en": utc_naive(datetime.now(timezone.utc)),
+        "codigo_http": 200,
+        # Se manda el texto exacto para conservar la capa RAW tal como llegó.
+        "raw_payload": payload_texto,
+    }
+
+
+def objetivo_para_item(item: dict, ahora_utc: datetime, modo: str) -> datetime:
+    if modo == "proximos" and item.get("fecha_hora_inicio"):
+        return interpretar_inicio_partido(str(item["fecha_hora_inicio"]))
+    return ahora_utc + timedelta(hours=24)
+
+
+def main() -> None:
+    modo = os.environ.get("CLIMA_MODO", "estadios").strip().lower()
+    if modo not in {"estadios", "proximos"}:
+        raise RuntimeError("CLIMA_MODO debe ser 'estadios' o 'proximos'.")
+
+    dias = int(os.environ.get("CLIMA_DIAS", "7"))
+
+    api = ApiIngesta()
+
+    print("Comprobando puente IONOS...")
+    health = api.health()
+    print(
+        "  OK -> BD:",
+        health.get("database"),
+        "| MariaDB:",
+        health.get("db_version"),
+        "| PHP:",
+        health.get("php"),
+    )
+
+    items = api.contexto_clima(modo=modo, dias=dias)
+    print(f"Contextos de clima recibidos: {len(items)} (modo={modo})")
+
+    lote_id = api.iniciar_lote(
+        fuente="open-meteo",
+        tipo_fuente="api",
+        notas=f"GitHub Actions; modo clima={modo}",
+    )
+    print(f"Lote RAW abierto: {lote_id}")
+
+    procesados = 0
+    errores = []
+
     try:
-        with conexion.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO bruto_lotes_ingesta (fuente, tipo_fuente, iniciado_en, estado)
-                VALUES (%s, %s, %s, %s)
-                """,
-                ("open-meteo", "api", ahora, "en_curso"),
-            )
-            lote_id = cur.lastrowid
+        for item in items:
+            ahora_utc = datetime.now(timezone.utc)
+            objetivo_utc = objetivo_para_item(item, ahora_utc, modo)
 
-        estadios = obtener_estadios(conexion)
-        print(f"Estadios con coordenadas: {len(estadios)}")
-
-        for estadio in estadios:
-            procesar_estadio(conexion, lote_id, estadio, ahora)
-
-        with conexion.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE bruto_lotes_ingesta
-                SET estado = %s, finalizado_en = %s
-                WHERE lote_id = %s
-                """,
-                ("ok", datetime.now(timezone.utc).replace(tzinfo=None), lote_id),
+            nombre = item.get("estadio") or f"estadio_id={item.get('estadio_id')}"
+            partido = item.get("partido_id")
+            print(
+                f"- {nombre}"
+                + (f" | partido_id={partido}" if partido else "")
+                + f" | objetivo UTC={objetivo_utc.isoformat()}"
             )
 
-        conexion.commit()
-        print("Ingesta de clima completada correctamente.")
+            try:
+                payload_texto, datos, parametros = pedir_prevision(
+                    float(item["latitud"]),
+                    float(item["longitud"]),
+                )
+                payload = construir_payload_guardado(
+                    lote_id=lote_id,
+                    item=item,
+                    ahora_utc=ahora_utc,
+                    objetivo_utc=objetivo_utc,
+                    payload_texto=payload_texto,
+                    datos=datos,
+                    parametros=parametros,
+                )
+                resultado = api.guardar_clima(payload)
+                procesados += 1
+                print(
+                    "  guardado -> RAW",
+                    resultado.get("respuesta_raw_id"),
+                    "| previsión",
+                    resultado.get("prevision_id"),
+                )
+            except Exception as exc:
+                errores.append(f"{nombre}: {exc}")
+                print(f"  ERROR: {exc}")
+
+        if errores and procesados:
+            estado = "parcial"
+        elif errores:
+            estado = "error"
+        else:
+            estado = "completado"
+
+        notas = (
+            f"Procesados={procesados}; errores={len(errores)}."
+            + ((" " + " | ".join(errores[:5])) if errores else "")
+        )
+        api.finalizar_lote(lote_id, estado=estado, notas=notas)
+
+        if errores:
+            raise RuntimeError(
+                f"La ingesta terminó con {len(errores)} error(es). "
+                f"Procesados correctamente: {procesados}. "
+                f"Primer error: {errores[0]}"
+            )
+
+        print(
+            f"Ingesta completada correctamente. "
+            f"Registros de clima guardados: {procesados}."
+        )
 
     except Exception:
-        conexion.rollback()
+        # Si el fallo fue antes de finalizar el lote, intentamos dejarlo marcado.
+        try:
+            api.finalizar_lote(
+                lote_id,
+                estado="error",
+                notas="La ejecución terminó con una excepción no controlada.",
+            )
+        except Exception:
+            pass
         raise
-    finally:
-        conexion.close()
 
 
 if __name__ == "__main__":
