@@ -1,7 +1,32 @@
 name: Actualizar partidos Liga F
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "Modo de ejecución"
+        required: true
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - reconciliar
+          - completo
+
+  # Automático dos veces al día.
+  # GitHub interpreta cron en UTC.
+  schedule:
+    - cron: "17 5,17 * * *"
+
+    # Una vez por semana revisa además unas pocas jornadas recientes.
+    - cron: "47 4 * * 1"
+
+concurrency:
+  group: partidos-ligaf
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   partidos-ligaf:
@@ -20,10 +45,26 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
-      - name: Cargar jornadas Liga F
+      - name: Determinar modo
+        id: modo
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "modo=${{ inputs.modo }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event.schedule }}" == "47 4 * * 1" ]]; then
+            echo "modo=reconciliar" >> "$GITHUB_OUTPUT"
+          else
+            echo "modo=auto" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Actualizar Liga F
         working-directory: ingestion
         env:
           INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
           INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
-          LIGAF_JORNADAS: "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30"
+          LIGAF_MODO: ${{ steps.modo.outputs.modo }}
+          LIGAF_RETRO_HORAS: "72"
+          LIGAF_FUTURO_DIAS: "21"
+          LIGAF_ADELANTE_JORNADAS: "3"
+          LIGAF_ULTIMAS_JORNADAS: "4"
         run: python ligaf_partidos.py
