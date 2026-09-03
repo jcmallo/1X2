@@ -78,6 +78,12 @@ PATRON_CLUB = re.compile(r"/clubes/([^/?#]+)", re.I)
 # pero actualmente muestra "-- : --" en la columna HORARIO. Para no inventar
 # horas ni perder la jornada, se usan los horarios reales verificados.
 HORARIOS_FALLBACK: dict[tuple[str, str, int], dict[tuple[str, str], str]] = {
+    # LaLiga conserva el Athletic Club - RCD Mallorca de la J27 2024-25
+    # con fecha y resultado, pero actualmente muestra "-- : --" como horario.
+    # El partido se disputó el 09/03/2025 a las 18:30 (hora peninsular).
+    ("2024-25", "primera", 27): {
+        ("athletic club", "rcd mallorca"): "18:30",
+    },
     ("2025-26", "primera", 30): {
         ("rayo vallecano", "elche cf"): "21:00",
         ("real sociedad", "levante ud"): "14:00",
