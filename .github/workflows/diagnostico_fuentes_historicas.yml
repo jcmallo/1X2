@@ -1,0 +1,28 @@
+name: Diagnóstico fuentes históricas
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v7
+
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencia
+        run: python -m pip install requests
+
+      - name: Probar fuentes históricas 2022-23
+        working-directory: ingestion
+        run: python diagnostico_fuentes_historicas.py
