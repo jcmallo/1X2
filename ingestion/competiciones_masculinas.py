@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Backfill de competiciones masculinas complementarias - v2.2.
+Backfill de competiciones masculinas complementarias - v2.3.
 
 CAMBIO CLAVE: Transfermarkt queda eliminado del proceso. No se usa HTML con
 JavaScript/anti-bot ni búsqueda de IDs externos.
 
-Cobertura validada en esta v2: 2022-23, 2023-24 y 2024-25.
+Cobertura validada: 2022-23, 2023-24, 2024-25 y 2025-26.
 - Copa del Rey: OpenFootball (raw.githubusercontent.com)
 - Champions: OpenFootball
 - Europa League: OpenFootball
@@ -20,17 +20,20 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 import requests
+from bs4 import BeautifulSoup
 
 from api_client import ApiIngesta
 
-TEMPORADAS_OK = ("2022-23", "2023-24", "2024-25")
+TEMPORADAS_OK = ("2022-23", "2023-24", "2024-25", "2025-26")
 COMPETICIONES = {
     "copa": "Copa del Rey",
     "supercopa": "Supercopa de España",
@@ -44,6 +47,19 @@ URLS_OPENFOOTBALL = {
     "europa": "https://raw.githubusercontent.com/openfootball/champions-league/master/{temporada}/el.txt",
     "conference": "https://raw.githubusercontent.com/openfootball/champions-league/master/{temporada}/conf.txt",
 }
+URLS_2025_26 = {
+    "copa": "https://en.wikipedia.org/wiki/2025%E2%80%9326_Copa_del_Rey",
+    "champions": "https://fixturedownload.com/feed/json/champions-league-2025",
+    "europa": "https://fixturedownload.com/feed/json/europa-league-2025",
+    "conference": "https://fixturedownload.com/feed/json/conference-league-2025",
+    "conference_qualifying": "https://raw.githubusercontent.com/openfootball/champions-league/master/2025-26/confq.txt",
+}
+FIXTURE_MIN_TOTAL = {
+    "champions": 180,   # 189 oficiales en el feed 2025-26
+    "europa": 180,      # 189 oficiales en el feed 2025-26
+    "conference": 145,  # 153 oficiales en el feed 2025-26
+}
+WIKI_COPA_MIN_MATCHBOXES = 120
 MESES = {
     "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
     "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
@@ -68,6 +84,42 @@ ALIAS_A_CANONICO = {
     "real sociedad de futbol": "real sociedad",
     "villarreal cf b": "villarreal b",
     "villarreal b": "villarreal b",
+    # Variantes usadas por Wikipedia / FixtureDownload en 2025-26.
+    "alaves": "deportivo alaves",
+    "barcelona": "fc barcelona",
+    "burgos": "burgos cf",
+    "cadiz": "cadiz cf",
+    "castellon": "cd castellon",
+    "cartagena": "fc cartagena",
+    "ceuta": "ad ceuta fc",
+    "cordoba": "cordoba cf",
+    "cultural leonesa": "cultural y deportiva leonesa",
+    "eibar": "sd eibar",
+    "elche": "elche cf",
+    "espanyol": "rcd espanyol de barcelona",
+    "getafe": "getafe cf",
+    "girona": "girona fc",
+    "granada": "granada cf",
+    "huesca": "sd huesca",
+    "las palmas": "ud las palmas",
+    "leganes": "cd leganes",
+    "levante": "levante ud",
+    "malaga": "malaga cf",
+    "mallorca": "rcd mallorca",
+    "mirandes": "cd mirandes",
+    "osasuna": "ca osasuna",
+    "oviedo": "real oviedo",
+    "racing de santander": "r racing club",
+    "real racing club de santander": "r racing club",
+    "sevilla": "sevilla fc",
+    "sporting de gijon": "real sporting",
+    "tenerife": "cd tenerife",
+    "valencia": "valencia cf",
+    "valladolid": "real valladolid cf",
+    "villarreal": "villarreal cf",
+    "zaragoza": "real zaragoza",
+    "almeria": "ud almeria",
+    "atleti": "atletico de madrid",
 }
 SUPERCOPA = {
     "2022-23": [
@@ -84,6 +136,11 @@ SUPERCOPA = {
         ("2025-01-08 20:00:00", "Semifinal", "Athletic Club", "FC Barcelona", 0, 2, False, False),
         ("2025-01-09 20:00:00", "Semifinal", "Real Madrid", "RCD Mallorca", 3, 0, False, False),
         ("2025-01-12 20:00:00", "Final", "Real Madrid", "FC Barcelona", 2, 5, False, False),
+    ],
+    "2025-26": [
+        ("2026-01-07 20:00:00", "Semifinal", "FC Barcelona", "Athletic Club", 5, 0, False, False),
+        ("2026-01-08 20:00:00", "Semifinal", "Atlético de Madrid", "Real Madrid", 1, 2, False, False),
+        ("2026-01-11 20:00:00", "Final", "FC Barcelona", "Real Madrid", 3, 2, False, False),
     ],
 }
 DATE_LINE_RE = re.compile(
@@ -117,6 +174,7 @@ class Partido:
     url: str
     equipo_local_id: int | None = None
     equipo_visitante_id: int | None = None
+    es_clasificatoria: bool = False
 
 def norm(texto: str) -> str:
     texto = unicodedata.normalize("NFKD", texto or "")
@@ -169,6 +227,265 @@ def descargar_texto(url: str, timeout: int = 45) -> str:
         except Exception as exc:
             ultimo = exc
     raise RuntimeError(f"No pude descargar fuente estática {url}: {ultimo}")
+
+
+def descargar_json(url: str, timeout: int = 45) -> tuple[list[dict], str]:
+    headers = {
+        "User-Agent": "quiniela-1x2-github-actions/2.3",
+        "Accept": "application/json,text/plain,*/*;q=0.8",
+    }
+    ultimo = None
+    for _ in range(3):
+        try:
+            r = requests.get(url, headers=headers, timeout=timeout)
+            r.raise_for_status()
+            data = r.json()
+            if not isinstance(data, list):
+                raise RuntimeError(f"JSON no es una lista: {type(data).__name__}")
+            return data, r.text
+        except Exception as exc:
+            ultimo = exc
+    raise RuntimeError(f"No pude descargar JSON {url}: {ultimo}")
+
+
+def descargar_html(url: str, timeout: int = 60) -> str:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "Chrome/140.0 Safari/537.36 quiniela-1x2/2.3"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    }
+    ultimo = None
+    for _ in range(3):
+        try:
+            r = requests.get(url, headers=headers, timeout=timeout)
+            r.raise_for_status()
+            html = r.text
+            if len(html) < 100_000 or "Copa del Rey" not in html:
+                raise RuntimeError(
+                    f"HTML Wikipedia inesperado: {len(html)} bytes; "
+                    f"inicio={html[:100]!r}"
+                )
+            return html
+        except Exception as exc:
+            ultimo = exc
+    raise RuntimeError(f"No pude descargar Wikipedia {url}: {ultimo}")
+
+
+def utc_a_madrid(fecha_utc: str) -> str:
+    dt = datetime.strptime(fecha_utc, "%Y-%m-%d %H:%M:%SZ")
+    dt = dt.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Europe/Madrid"))
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def ronda_fixture(competicion: str, numero: int) -> str:
+    if competicion in {"UEFA Champions League", "UEFA Europa League"}:
+        etiquetas = {
+            9: "Play-off ida", 10: "Play-off vuelta",
+            11: "Octavos ida", 12: "Octavos vuelta",
+            13: "Cuartos ida", 14: "Cuartos vuelta",
+            15: "Semifinal ida", 16: "Semifinal vuelta", 17: "Final",
+        }
+        return f"Fase liga J{numero}" if numero <= 8 else etiquetas.get(numero, f"Ronda {numero}")
+    etiquetas = {
+        7: "Play-off ida", 8: "Play-off vuelta",
+        9: "Octavos ida", 10: "Octavos vuelta",
+        11: "Cuartos ida", 12: "Cuartos vuelta",
+        13: "Semifinal ida", 14: "Semifinal vuelta", 15: "Final",
+    }
+    return f"Fase liga J{numero}" if numero <= 6 else etiquetas.get(numero, f"Ronda {numero}")
+
+
+def parse_fixturedownload(
+    data: list[dict], *, temporada: str, competicion: str, url: str,
+    idx: dict[str, Equipo], min_total: int,
+) -> list[Partido]:
+    if len(data) < min_total:
+        raise RuntimeError(
+            f"FixtureDownload devolvió solo {len(data)} partidos para {competicion}; "
+            f"mínimo de seguridad={min_total}. No se escribirá nada."
+        )
+
+    requeridos = {
+        "MatchNumber", "RoundNumber", "DateUtc", "HomeTeam", "AwayTeam",
+        "HomeTeamScore", "AwayTeamScore",
+    }
+    out: list[Partido] = []
+    for pos, row in enumerate(data, start=1):
+        if not isinstance(row, dict) or not requeridos.issubset(row):
+            raise RuntimeError(
+                f"FixtureDownload cambió el esquema en fila {pos}. "
+                "No se escribirá nada."
+            )
+        if row["HomeTeamScore"] is None or row["AwayTeamScore"] is None:
+            raise RuntimeError(
+                f"FixtureDownload tiene un resultado incompleto en fila {pos}. "
+                "2025-26 debe estar finalizada; no se escribirá nada."
+            )
+
+        local = limpiar_nombre_fuente(str(row["HomeTeam"]).strip())
+        visitante = limpiar_nombre_fuente(str(row["AwayTeam"]).strip())
+        ldb = resolver_equipo(local, idx)
+        vdb = resolver_equipo(visitante, idx)
+        if ldb is None and vdb is None:
+            continue
+
+        num = int(row["MatchNumber"])
+        rnd = int(row["RoundNumber"])
+        gl = int(row["HomeTeamScore"])
+        gv = int(row["AwayTeamScore"])
+        out.append(Partido(
+            fuente="fixturedownload",
+            id_fuente=f"{temporada}-{norm(competicion)}-{num}",
+            competicion=competicion,
+            ronda=ronda_fixture(competicion, rnd),
+            fecha_sql=utc_a_madrid(str(row["DateUtc"])),
+            local=local,
+            visitante=visitante,
+            goles_local=gl,
+            goles_visitante=gv,
+            hubo_prorroga=False,
+            hubo_penaltis=False,
+            resultado_raw=f"{gl}-{gv}",
+            url=url,
+            equipo_local_id=ldb.equipo_id if ldb else None,
+            equipo_visitante_id=vdb.equipo_id if vdb else None,
+        ))
+
+    if not out:
+        raise RuntimeError(
+            f"FixtureDownload no produjo ningún partido de nuestros equipos para "
+            f"{competicion} {temporada}. No se escribirá nada."
+        )
+    return out
+
+
+WIKI_DATE_RE = re.compile(
+    r"\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|"
+    r"September|October|November|December)\s+(\d{4})\b",
+    re.I,
+)
+WIKI_TIME_RE = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)")
+WIKI_SCORE_RE = re.compile(r"(?<!\d)(\d{1,2})\s*[–—-]\s*(\d{1,2})(?!\d)")
+
+
+def limpiar_equipo_wiki(nombre: str) -> str:
+    nombre = re.sub(r"\[[^\]]+\]", "", nombre)
+    # La Copa marca la categoría del club: Burgos (2), Atlético Tordesillas (5).
+    nombre = re.sub(r"\s+\(\d+\)\s*$", "", nombre).strip()
+    return limpiar_nombre_fuente(nombre)
+
+
+def resultado_wiki(texto: str) -> tuple[int, int, bool, bool]:
+    m = WIKI_SCORE_RE.search(texto)
+    if not m:
+        raise RuntimeError(f"Resultado Wikipedia no reconocido: {texto!r}")
+    low = norm(texto)
+    prorroga = "a e t" in low or "extra time" in low
+    penaltis = "pen" in low or "pens" in low or re.search(r"\bp\b", low) is not None
+    return int(m.group(1)), int(m.group(2)), prorroga, penaltis
+
+
+def parse_wikipedia_copa(
+    html: str, *, temporada: str, url: str, idx: dict[str, Equipo],
+) -> tuple[list[Partido], int]:
+    soup = BeautifulSoup(html, "html.parser")
+    out: list[Partido] = []
+    vistos: set[tuple[str, str, str]] = set()
+    parseados_total = 0
+
+    # footballbox suele envolver cada ficha. El fallback a table cubre cambios
+    # de clase del template de MediaWiki.
+    contenedores = soup.select(".footballbox, .vevent")
+    if not contenedores:
+        contenedores = soup.find_all("table")
+
+    for cont in contenedores:
+        texto_cont = " ".join(cont.stripped_strings)
+        dm = WIKI_DATE_RE.search(texto_cont)
+        tm = WIKI_TIME_RE.search(texto_cont)
+        if not dm or not tm:
+            continue
+
+        score_row = None
+        score_idx = None
+        score_text = None
+        for tr in cont.find_all("tr"):
+            cells = tr.find_all(["th", "td"], recursive=False)
+            if len(cells) < 3:
+                continue
+            for i, cell in enumerate(cells):
+                ct = cell.get_text(" ", strip=True)
+                if WIKI_SCORE_RE.search(ct) and i >= 1 and i + 1 < len(cells):
+                    score_row, score_idx, score_text = cells, i, ct
+                    break
+            if score_row is not None:
+                break
+        if score_row is None or score_idx is None or score_text is None:
+            continue
+
+        local = limpiar_equipo_wiki(score_row[score_idx - 1].get_text(" ", strip=True))
+        visitante = limpiar_equipo_wiki(score_row[score_idx + 1].get_text(" ", strip=True))
+        if not local or not visitante:
+            continue
+
+        dia, mes, anyo = dm.groups()
+        fecha = datetime.strptime(f"{dia} {mes} {anyo}", "%d %B %Y")
+        hh, mm = int(tm.group(1)), int(tm.group(2))
+        # Wikipedia expresa explícitamente WET/WEST en Canarias. Para guardar
+        # todos los partidos en Europe/Madrid, sumar una hora en esos casos.
+        if re.search(r"\b(?:WET|WEST)\b", texto_cont):
+            fecha = fecha.replace(hour=hh, minute=mm) + timedelta(hours=1)
+        else:
+            fecha = fecha.replace(hour=hh, minute=mm)
+        fecha_sql = fecha.strftime("%Y-%m-%d %H:%M:%S")
+
+        gl, gv, pro, pen = resultado_wiki(score_text)
+        key = (fecha_sql, canonical_key(local), canonical_key(visitante))
+        if key in vistos:
+            continue
+        vistos.add(key)
+        parseados_total += 1
+
+        ldb = resolver_equipo(local, idx)
+        vdb = resolver_equipo(visitante, idx)
+        if ldb is None and vdb is None:
+            continue
+
+        heading = cont.find_previous(["h2", "h3", "h4", "h5"])
+        ronda = heading.get_text(" ", strip=True) if heading else None
+        semilla = "|".join(["wikipedia", temporada, fecha_sql, norm(local), norm(visitante)])
+        out.append(Partido(
+            fuente="wikipedia",
+            id_fuente=hashlib.sha1(semilla.encode("utf-8")).hexdigest(),
+            competicion="Copa del Rey",
+            ronda=ronda,
+            fecha_sql=fecha_sql,
+            local=local,
+            visitante=visitante,
+            goles_local=gl,
+            goles_visitante=gv,
+            hubo_prorroga=pro,
+            hubo_penaltis=pen,
+            resultado_raw=score_text,
+            url=url,
+            equipo_local_id=ldb.equipo_id if ldb else None,
+            equipo_visitante_id=vdb.equipo_id if vdb else None,
+        ))
+
+    if parseados_total < WIKI_COPA_MIN_MATCHBOXES:
+        raise RuntimeError(
+            f"Wikipedia Copa 2025-26: solo reconocí {parseados_total} fichas de partido; "
+            f"mínimo de seguridad={WIKI_COPA_MIN_MATCHBOXES}. No se escribirá nada."
+        )
+    if not out:
+        raise RuntimeError(
+            "Wikipedia Copa 2025-26 no produjo partidos de nuestros equipos. "
+            "No se escribirá nada."
+        )
+    return out, parseados_total
 
 def fecha_de_linea(linea: str, temporada: str) -> str | None:
     m = DATE_LINE_RE.match(linea.strip())
@@ -249,7 +566,7 @@ def separar_uefa(cuerpo: str) -> tuple[str, str, str] | None:
     return limpiar_nombre_fuente(local), limpiar_nombre_fuente(visitante), resultado
 
 def parse_openfootball(texto: str, *, temporada: str, competicion: str, url: str,
-                       idx: dict[str, Equipo]) -> list[Partido]:
+                       idx: dict[str, Equipo], es_clasificatoria: bool = False) -> list[Partido]:
     fecha: str | None = None
     hora: str | None = None
     ronda: str | None = None
@@ -311,6 +628,7 @@ def parse_openfootball(texto: str, *, temporada: str, competicion: str, url: str
             url=url,
             equipo_local_id=local_db.equipo_id if local_db else None,
             equipo_visitante_id=visitante_db.equipo_id if visitante_db else None,
+            es_clasificatoria=es_clasificatoria,
         ))
     if esperados_fuente is not None:
         minimo = max(1, int(esperados_fuente * 0.90))
@@ -355,6 +673,56 @@ def partidos_supercopa(temporada: str, idx: dict[str, Equipo]) -> list[Partido]:
         ))
     return out
 
+
+def cargar_2025_26(clave: str, idx: dict[str, Equipo]) -> tuple[list[Partido], list[tuple[str, str, str, str]]]:
+    comp = COMPETICIONES[clave]
+    raws: list[tuple[str, str, str, str]] = []
+
+    if clave == "supercopa":
+        return partidos_supercopa("2025-26", idx), raws
+
+    if clave == "copa":
+        url = URLS_2025_26["copa"]
+        print(f"Descargando Copa del Rey: {url}")
+        html = descargar_html(url)
+        ps, total = parse_wikipedia_copa(html, temporada="2025-26", url=url, idx=idx)
+        print(f"  Wikipedia OK: {total} fichas completas; relevantes={len(ps)}")
+        snapshot = json.dumps([
+            {
+                "fecha": p.fecha_sql, "ronda": p.ronda,
+                "local": p.local, "visitante": p.visitante,
+                "goles_local": p.goles_local, "goles_visitante": p.goles_visitante,
+                "prorroga": p.hubo_prorroga, "penaltis": p.hubo_penaltis,
+            }
+            for p in ps
+        ], ensure_ascii=False)
+        raws.append(("wikipedia", url, "wiki_matches", snapshot))
+        return ps, raws
+
+    url = URLS_2025_26[clave]
+    print(f"Descargando {comp}: {url}")
+    data, raw = descargar_json(url)
+    ps = parse_fixturedownload(
+        data, temporada="2025-26", competicion=comp, url=url, idx=idx,
+        min_total=FIXTURE_MIN_TOTAL[clave],
+    )
+    print(f"  FixtureDownload OK: {len(data)} partidos fuente; relevantes={len(ps)}")
+    raws.append(("fixturedownload", url, "fixture_json", raw))
+
+    if clave == "conference":
+        qurl = URLS_2025_26["conference_qualifying"]
+        print(f"Descargando previa Conference: {qurl}")
+        qtext = descargar_texto(qurl)
+        qps = parse_openfootball(
+            qtext, temporada="2025-26", competicion=comp, url=qurl, idx=idx,
+            es_clasificatoria=True,
+        )
+        print(f"  previa Conference relevante: {len(qps)}")
+        ps.extend(qps)
+        raws.append(("openfootball", qurl, "openfootball_txt", qtext))
+
+    return ps, raws
+
 def cargar_contexto(api: ApiIngesta, temporada: str) -> list[Equipo]:
     data = api._request_json(
         "GET", "contexto_equipos_complementarios.php",
@@ -394,8 +762,16 @@ def main() -> None:
     print(f"Temporada {args.temporada}: {len(equipos)} equipos ya existentes.")
     print("Transfermarkt: DESACTIVADO")
     partidos: list[Partido] = []
-    raws: list[tuple[str, str, str]] = []
+    raws: list[tuple[str, str, str, str]] = []
     for clave in seleccion_claves(args.competicion):
+        if args.temporada == "2025-26":
+            ps, nuevos_raws = cargar_2025_26(clave, idx)
+            if clave == "supercopa":
+                print(f"Supercopa: {len(ps)} partidos relevantes")
+            partidos.extend(ps)
+            raws.extend(nuevos_raws)
+            continue
+
         if clave == "supercopa":
             ps = partidos_supercopa(args.temporada, idx)
             print(f"Supercopa: {len(ps)} partidos relevantes")
@@ -410,7 +786,7 @@ def main() -> None:
         ps = parse_openfootball(texto, temporada=args.temporada, competicion=comp, url=url, idx=idx)
         print(f"  partidos de nuestros equipos: {len(ps)}")
         partidos.extend(ps)
-        raws.append(("openfootball", url, texto))
+        raws.append(("openfootball", url, "openfootball_txt", texto))
     unicos: dict[tuple[str, str], Partido] = {}
     for p in partidos:
         unicos[(p.fuente, p.id_fuente)] = p
@@ -425,14 +801,14 @@ def main() -> None:
         print(f"TOTAL relevantes: {len(partidos)}")
         return
     lote = api.iniciar_lote(
-        fuente="openfootball", tipo_fuente="cal_extra",
-        notas=f"Competiciones masculinas v2 {args.temporada}; seleccion={args.competicion}; sin Transfermarkt",
+        fuente="multi-futbol" if args.temporada == "2025-26" else "openfootball", tipo_fuente="cal_extra",
+        notas=f"Competiciones masculinas v2.3 {args.temporada}; seleccion={args.competicion}; sin Transfermarkt",
     )
     print("Lote abierto:", lote)
-    for fuente, url, texto in raws:
+    for fuente, url, tipo_contenido, contenido in raws:
         api.guardar_documento({
             "lote_id": lote, "fuente": fuente, "url": url,
-            "tipo_contenido": "openfootball_txt", "obtenido_en": ahora_sql(), "contenido": texto,
+            "tipo_contenido": tipo_contenido, "obtenido_en": ahora_sql(), "contenido": contenido,
         })
     creados = actualizados = errores = 0
     mensajes: list[str] = []
@@ -440,7 +816,7 @@ def main() -> None:
         payload = {
             "lote_id": lote, "fuente": p.fuente, "id_partido_fuente": p.id_fuente,
             "temporada": args.temporada, "competicion": p.competicion, "ronda": p.ronda,
-            "es_clasificatoria": False, "fecha_hora_inicio": p.fecha_sql,
+            "es_clasificatoria": p.es_clasificatoria, "fecha_hora_inicio": p.fecha_sql,
             "hora_confirmada": True, "estado": "FINALIZADO",
             "equipo_local_id": p.equipo_local_id, "equipo_visitante_id": p.equipo_visitante_id,
             "local_nombre": p.local, "visitante_nombre": p.visitante,
@@ -461,7 +837,7 @@ def main() -> None:
             print("ERROR:", msg)
     api.finalizar_lote(
         lote, estado="completado" if errores == 0 else "error",
-        notas=f"v2; partidos={len(partidos)}; creados={creados}; actualizados={actualizados}; errores={errores}",
+        notas=f"v2.3; partidos={len(partidos)}; creados={creados}; actualizados={actualizados}; errores={errores}",
     )
     print(f"\nRESUMEN {args.temporada}: creados={creados}, actualizados={actualizados}, errores={errores}, total={len(partidos)}")
     if mensajes:
