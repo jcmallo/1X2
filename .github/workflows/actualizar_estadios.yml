@@ -1,0 +1,41 @@
+name: Actualizar coordenadas estadios
+
+on:
+  workflow_dispatch:
+
+  # Los estadios cambian poco, pero si aparece uno nuevo queremos
+  # geocodificarlo antes de que el proceso de clima lo necesite.
+  schedule:
+    - cron: "7 4 * * *"
+
+concurrency:
+  group: coordenadas-estadios
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  estadios:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v7
+
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Completar coordenadas pendientes
+        working-directory: ingestion
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+          ESTADIOS_LIMITE: "100"
+        run: python estadios_geocodificar.py
