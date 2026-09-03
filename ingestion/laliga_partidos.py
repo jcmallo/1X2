@@ -413,9 +413,21 @@ def parse_fecha_hora_y_estadio(
             continue
         if re.fullmatch(r"[\d\.\,\s]+\*?", t):
             continue
-        if st in {"horario peninsular", "jornada"}:
+        # LALIGA suele separar "19:00 h" en dos strings: "19:00" y "h".
+        # Esa "h" NO es el estadio.
+        if st in {
+            "h",
+            "horario peninsular",
+            "jornada",
+            "previa",
+            "alineaciones",
+            "minuto a minuto",
+            "estadisticas",
+        }:
             continue
         if re.fullmatch(r"jornada\s+\d+", st):
+            continue
+        if len(t) <= 2:
             continue
         estadio = t
         break

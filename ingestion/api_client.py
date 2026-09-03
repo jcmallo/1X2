@@ -9,6 +9,7 @@ GitHub Actions no se conecta directamente a MariaDB. Solo conoce:
 from __future__ import annotations
 
 import os
+import time
 from urllib.parse import urljoin
 
 import requests
@@ -77,21 +78,67 @@ class ApiIngesta:
 
         return data
 
+    def _request_json(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        params: dict | None = None,
+        json: dict | None = None,
+        timeout: int = 30,
+    ) -> dict:
+        """Petición al puente IONOS con reintentos ante fallos temporales."""
+        ultimo_error: Exception | None = None
+
+        for intento in range(1, 4):
+            try:
+                r = self.session.request(
+                    method,
+                    self._url(endpoint),
+                    params=params,
+                    json=json,
+                    timeout=timeout,
+                )
+
+                if r.status_code in {429, 500, 502, 503, 504} and intento < 3:
+                    print(
+                        f"API IONOS HTTP {r.status_code}; "
+                        f"reintento {intento}/3..."
+                    )
+                    time.sleep(2 ** (intento - 1))
+                    continue
+
+                return self._json_o_error(r)
+
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                ultimo_error = exc
+                if intento < 3:
+                    print(
+                        "API IONOS temporalmente no disponible; "
+                        f"reintento {intento}/3..."
+                    )
+                    time.sleep(2 ** (intento - 1))
+                    continue
+                raise
+
+        raise RuntimeError(
+            f"No se pudo completar la petición a IONOS: {ultimo_error}"
+        )
+
     def health(self) -> dict:
-        r = self.session.get(self._url("health.php"), timeout=20)
-        return self._json_o_error(r)
+        return self._request_json("GET", "health.php", timeout=20)
 
     def contexto_clima(self, modo: str = "estadios", dias: int = 7) -> list[dict]:
         params = {"modo": modo}
         if modo == "proximos":
             params["dias"] = max(1, min(14, int(dias)))
 
-        r = self.session.get(
-            self._url("contexto_clima.php"),
+        data = self._request_json(
+            "GET",
+            "contexto_clima.php",
             params=params,
             timeout=30,
         )
-        data = self._json_o_error(r)
         items = data.get("items", [])
         if not isinstance(items, list):
             raise RuntimeError("La API devolvió 'items' con formato inválido.")
@@ -119,12 +166,12 @@ class ApiIngesta:
             "reconciliar": "1" if reconciliar else "0",
             "ultimas_jornadas": max(1, min(10, int(ultimas_jornadas))),
         }
-        r = self.session.get(
-            self._url("contexto_partidos.php"),
+        data = self._request_json(
+            "GET",
+            "contexto_partidos.php",
             params=params,
             timeout=30,
         )
-        data = self._json_o_error(r)
         jornadas = data.get("jornadas")
         if not isinstance(jornadas, list):
             raise RuntimeError(
@@ -145,37 +192,37 @@ class ApiIngesta:
         if notas:
             payload["notas"] = notas
 
-        r = self.session.post(
-            self._url("iniciar_lote.php"),
+        data = self._request_json(
+            "POST",
+            "iniciar_lote.php",
             json=payload,
             timeout=30,
         )
-        data = self._json_o_error(r)
         return int(data["lote_id"])
 
     def guardar_clima(self, payload: dict) -> dict:
-        r = self.session.post(
-            self._url("guardar_clima.php"),
+        return self._request_json(
+            "POST",
+            "guardar_clima.php",
             json=payload,
             timeout=45,
         )
-        return self._json_o_error(r)
 
     def guardar_documento(self, payload: dict) -> dict:
-        r = self.session.post(
-            self._url("guardar_documento.php"),
+        return self._request_json(
+            "POST",
+            "guardar_documento.php",
             json=payload,
             timeout=60,
         )
-        return self._json_o_error(r)
 
     def guardar_partido(self, payload: dict) -> dict:
-        r = self.session.post(
-            self._url("guardar_partido.php"),
+        return self._request_json(
+            "POST",
+            "guardar_partido.php",
             json=payload,
             timeout=60,
         )
-        return self._json_o_error(r)
 
     def finalizar_lote(
         self,
@@ -190,9 +237,9 @@ class ApiIngesta:
         if notas:
             payload["notas"] = notas
 
-        r = self.session.post(
-            self._url("finalizar_lote.php"),
+        return self._request_json(
+            "POST",
+            "finalizar_lote.php",
             json=payload,
             timeout=30,
         )
-        return self._json_o_error(r)
