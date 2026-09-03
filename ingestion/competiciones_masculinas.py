@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Backfill de competiciones masculinas complementarias - v2.3.
+Backfill de competiciones masculinas complementarias - v2.4.
 
 CAMBIO CLAVE: Transfermarkt queda eliminado del proceso. No se usa HTML con
 JavaScript/anti-bot ni búsqueda de IDs externos.
 
-Cobertura validada: 2022-23, 2023-24, 2024-25 y 2025-26.
+Cobertura: 2022-23 a 2026-27. La temporada actual admite PROGRAMADO y FINALIZADO.
 - Copa del Rey: OpenFootball (raw.githubusercontent.com)
 - Champions: OpenFootball
 - Europa League: OpenFootball
@@ -33,7 +33,9 @@ from bs4 import BeautifulSoup
 
 from api_client import ApiIngesta
 
-TEMPORADAS_OK = ("2022-23", "2023-24", "2024-25", "2025-26")
+TEMPORADAS_HISTORICAS = ("2022-23", "2023-24", "2024-25")
+TEMPORADA_CERRADA_MIXTA = "2025-26"
+TEMPORADA_ACTUAL = "2026-27"
 COMPETICIONES = {
     "copa": "Copa del Rey",
     "supercopa": "Supercopa de España",
@@ -54,6 +56,24 @@ URLS_2025_26 = {
     "conference": "https://fixturedownload.com/feed/json/conference-league-2025",
     "conference_qualifying": "https://raw.githubusercontent.com/openfootball/champions-league/master/2025-26/confq.txt",
 }
+URLS_2026_27 = {
+    "copa": "https://en.wikipedia.org/wiki/2026%E2%80%9327_Copa_del_Rey",
+    "champions": "https://fixturedownload.com/feed/json/champions-league-2026",
+    "europa": "https://fixturedownload.com/feed/json/europa-league-2026",
+    "conference": "https://fixturedownload.com/feed/json/conference-league-2026",
+}
+FIXTURE_MIN_TOTAL_ACTUAL = {
+    # La fase liga ya está publicada: 36 equipos.
+    # UCL/UEL = 8 partidos/equipo => 144; UECL = 6 => 108.
+    # Dejamos margen para no hacer el proceso frágil por una actualización parcial.
+    "champions": 100,
+    "europa": 100,
+    "conference": 80,
+}
+FBREF_GETAFE_UECL_URL = (
+    "https://fbref.com/en/squads/7848bd64/2026-2027/"
+    "matchlogs/c882/schedule/Getafe-Scores-and-Fixtures-Conference-League"
+)
 FIXTURE_MIN_TOTAL = {
     "champions": 180,   # 189 oficiales en el feed 2025-26
     "europa": 180,      # 189 oficiales en el feed 2025-26
@@ -175,6 +195,8 @@ class Partido:
     equipo_local_id: int | None = None
     equipo_visitante_id: int | None = None
     es_clasificatoria: bool = False
+    estado: str = "FINALIZADO"
+    hora_confirmada: bool = True
 
 def norm(texto: str) -> str:
     texto = unicodedata.normalize("NFKD", texto or "")
@@ -301,6 +323,8 @@ def ronda_fixture(competicion: str, numero: int) -> str:
 def parse_fixturedownload(
     data: list[dict], *, temporada: str, competicion: str, url: str,
     idx: dict[str, Equipo], min_total: int,
+    permitir_programados: bool = False,
+    permitir_cero_relevantes: bool = False,
 ) -> list[Partido]:
     if len(data) < min_total:
         raise RuntimeError(
@@ -313,48 +337,83 @@ def parse_fixturedownload(
         "HomeTeamScore", "AwayTeamScore",
     }
     out: list[Partido] = []
+
     for pos, row in enumerate(data, start=1):
         if not isinstance(row, dict) or not requeridos.issubset(row):
             raise RuntimeError(
                 f"FixtureDownload cambió el esquema en fila {pos}. "
                 "No se escribirá nada."
             )
-        if row["HomeTeamScore"] is None or row["AwayTeamScore"] is None:
+
+        score_local = row["HomeTeamScore"]
+        score_visitante = row["AwayTeamScore"]
+
+        # O están ambos resultados o ninguno. Un parcial sí sería inconsistente.
+        if (score_local is None) != (score_visitante is None):
             raise RuntimeError(
-                f"FixtureDownload tiene un resultado incompleto en fila {pos}. "
-                "2025-26 debe estar finalizada; no se escribirá nada."
+                f"FixtureDownload tiene marcador parcial en fila {pos}. "
+                "No se escribirá nada."
             )
+
+        if score_local is None:
+            if not permitir_programados:
+                raise RuntimeError(
+                    f"FixtureDownload tiene un resultado incompleto en fila {pos}. "
+                    f"{temporada} se esperaba cerrada; no se escribirá nada."
+                )
+            gl = gv = None
+            estado = "PROGRAMADO"
+            resultado_raw = None
+        else:
+            gl = int(score_local)
+            gv = int(score_visitante)
+            estado = "FINALIZADO"
+            resultado_raw = f"{gl}-{gv}"
 
         local = limpiar_nombre_fuente(str(row["HomeTeam"]).strip())
         visitante = limpiar_nombre_fuente(str(row["AwayTeam"]).strip())
         ldb = resolver_equipo(local, idx)
         vdb = resolver_equipo(visitante, idx)
+
         if ldb is None and vdb is None:
             continue
 
-        num = int(row["MatchNumber"])
-        rnd = int(row["RoundNumber"])
-        gl = int(row["HomeTeamScore"])
-        gv = int(row["AwayTeamScore"])
+        try:
+            num = int(row["MatchNumber"])
+            rnd = int(row["RoundNumber"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"FixtureDownload cambió MatchNumber/RoundNumber en fila {pos}."
+            ) from exc
+
+        fecha_utc = str(row["DateUtc"] or "").strip()
+        if not fecha_utc:
+            raise RuntimeError(
+                f"FixtureDownload no trae DateUtc en fila {pos}. "
+                "No invento fecha/hora."
+            )
+
         out.append(Partido(
             fuente="fixturedownload",
             id_fuente=f"{temporada}-{norm(competicion)}-{num}",
             competicion=competicion,
             ronda=ronda_fixture(competicion, rnd),
-            fecha_sql=utc_a_madrid(str(row["DateUtc"])),
+            fecha_sql=utc_a_madrid(fecha_utc),
             local=local,
             visitante=visitante,
             goles_local=gl,
             goles_visitante=gv,
             hubo_prorroga=False,
             hubo_penaltis=False,
-            resultado_raw=f"{gl}-{gv}",
+            resultado_raw=resultado_raw,
             url=url,
             equipo_local_id=ldb.equipo_id if ldb else None,
             equipo_visitante_id=vdb.equipo_id if vdb else None,
+            estado=estado,
+            hora_confirmada=True,
         ))
 
-    if not out:
+    if not out and not permitir_cero_relevantes:
         raise RuntimeError(
             f"FixtureDownload no produjo ningún partido de nuestros equipos para "
             f"{competicion} {temporada}. No se escribirá nada."
@@ -486,6 +545,277 @@ def parse_wikipedia_copa(
             "No se escribirá nada."
         )
     return out, parseados_total
+
+
+def descargar_copa_actual_si_existe(url: str) -> tuple[str | None, str | None]:
+    """
+    Wikipedia 2026-27 actualmente puede ser un redirect a la página genérica.
+    Solo devolvemos HTML cuando el H1 identifica inequívocamente la temporada.
+    """
+    headers = {
+        "User-Agent": "quiniela-1x2-github-actions/2.4",
+        "Accept": "text/html,*/*;q=0.8",
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=45, allow_redirects=True)
+        r.raise_for_status()
+    except Exception as exc:
+        print(f"  Copa actual: fuente todavía no utilizable ({exc}). Se omite.")
+        return None, None
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    h1 = soup.find("h1")
+    titulo = h1.get_text(" ", strip=True) if h1 else ""
+
+    if "2026" not in titulo or "27" not in titulo or "Copa del Rey" not in titulo:
+        print(
+            "  Copa 2026-27: todavía no hay página de temporada utilizable "
+            f"(título recibido={titulo!r}). Se omite sin error."
+        )
+        return None, None
+
+    return r.text, r.url
+
+
+def parse_wikipedia_copa_actual(
+    html: str, *, temporada: str, url: str, idx: dict[str, Equipo],
+) -> tuple[list[Partido], int]:
+    """
+    Soporta tanto partidos ya jugados como fichas futuras con 'v'.
+    Si una ficha no tiene hora exacta, NO se guarda.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    out: list[Partido] = []
+    vistos: set[tuple[str, str, str]] = set()
+    fichas_validas = 0
+
+    contenedores = soup.select(".footballbox, .vevent")
+    if not contenedores:
+        return [], 0
+
+    for cont in contenedores:
+        texto_cont = " ".join(cont.stripped_strings)
+        dm = WIKI_DATE_RE.search(texto_cont)
+        tm = WIKI_TIME_RE.search(texto_cont)
+        if not dm or not tm:
+            # Sin hora exacta no inventamos nada.
+            continue
+
+        cells_match = None
+        score_idx = None
+        score_text = None
+
+        for tr in cont.find_all("tr"):
+            cells = tr.find_all(["th", "td"], recursive=False)
+            if len(cells) < 3:
+                continue
+            for i, cell in enumerate(cells):
+                if i < 1 or i + 1 >= len(cells):
+                    continue
+                ct = cell.get_text(" ", strip=True)
+                if WIKI_SCORE_RE.search(ct) or norm(ct) in {"v", "vs", "v s"}:
+                    cells_match, score_idx, score_text = cells, i, ct
+                    break
+            if cells_match is not None:
+                break
+
+        if cells_match is None or score_idx is None or score_text is None:
+            continue
+
+        local = limpiar_equipo_wiki(
+            cells_match[score_idx - 1].get_text(" ", strip=True)
+        )
+        visitante = limpiar_equipo_wiki(
+            cells_match[score_idx + 1].get_text(" ", strip=True)
+        )
+        if not local or not visitante:
+            continue
+
+        dia, mes, anyo = dm.groups()
+        fecha = datetime.strptime(f"{dia} {mes} {anyo}", "%d %B %Y")
+        hh, mm = int(tm.group(1)), int(tm.group(2))
+        fecha = fecha.replace(hour=hh, minute=mm)
+
+        if re.search(r"\b(?:WET|WEST)\b", texto_cont):
+            fecha += timedelta(hours=1)
+
+        fecha_sql = fecha.strftime("%Y-%m-%d %H:%M:%S")
+        key = (fecha_sql, canonical_key(local), canonical_key(visitante))
+        if key in vistos:
+            continue
+        vistos.add(key)
+        fichas_validas += 1
+
+        ldb = resolver_equipo(local, idx)
+        vdb = resolver_equipo(visitante, idx)
+        if ldb is None and vdb is None:
+            continue
+
+        if WIKI_SCORE_RE.search(score_text):
+            gl, gv, pro, pen = resultado_wiki(score_text)
+            estado = "FINALIZADO"
+            resultado_raw = score_text
+        else:
+            gl = gv = None
+            pro = pen = False
+            estado = "PROGRAMADO"
+            resultado_raw = None
+
+        heading = cont.find_previous(["h2", "h3", "h4", "h5"])
+        ronda = heading.get_text(" ", strip=True) if heading else None
+
+        semilla = "|".join(
+            ["wikipedia", temporada, fecha_sql, norm(local), norm(visitante)]
+        )
+        out.append(Partido(
+            fuente="wikipedia",
+            id_fuente=hashlib.sha1(semilla.encode("utf-8")).hexdigest(),
+            competicion="Copa del Rey",
+            ronda=ronda,
+            fecha_sql=fecha_sql,
+            local=local,
+            visitante=visitante,
+            goles_local=gl,
+            goles_visitante=gv,
+            hubo_prorroga=pro,
+            hubo_penaltis=pen,
+            resultado_raw=resultado_raw,
+            url=url,
+            equipo_local_id=ldb.equipo_id if ldb else None,
+            equipo_visitante_id=vdb.equipo_id if vdb else None,
+            estado=estado,
+            hora_confirmada=True,
+        ))
+
+    return out, fichas_validas
+
+
+def partidos_getafe_previa_2026_27(
+    idx: dict[str, Equipo],
+) -> tuple[list[Partido], tuple[str, str, str, str] | None]:
+    """
+    Los dos partidos ya disputados por Getafe en el play-off de Conference.
+    Datos verificados contra el calendario 2026-27 de Getafe en FBref.
+    """
+    filas = [
+        ("2026-08-20 21:00:00", "Play-off ida", "Getafe CF", "Partizan", 3, 1),
+        ("2026-08-27 21:00:00", "Play-off vuelta", "Partizan", "Getafe CF", 2, 1),
+    ]
+
+    out: list[Partido] = []
+    snapshot = []
+
+    for fecha, ronda, local, visitante, gl, gv in filas:
+        ldb = resolver_equipo(local, idx)
+        vdb = resolver_equipo(visitante, idx)
+        if ldb is None and vdb is None:
+            continue
+
+        semilla = "|".join(
+            ["fbref", TEMPORADA_ACTUAL, ronda, fecha, norm(local), norm(visitante)]
+        )
+        out.append(Partido(
+            fuente="fbref",
+            id_fuente=hashlib.sha1(semilla.encode("utf-8")).hexdigest(),
+            competicion="UEFA Conference League",
+            ronda=ronda,
+            fecha_sql=fecha,
+            local=local,
+            visitante=visitante,
+            goles_local=gl,
+            goles_visitante=gv,
+            hubo_prorroga=False,
+            hubo_penaltis=False,
+            resultado_raw=f"{gl}-{gv}",
+            url=FBREF_GETAFE_UECL_URL,
+            equipo_local_id=ldb.equipo_id if ldb else None,
+            equipo_visitante_id=vdb.equipo_id if vdb else None,
+            es_clasificatoria=True,
+            estado="FINALIZADO",
+            hora_confirmada=True,
+        ))
+        snapshot.append({
+            "fecha": fecha,
+            "ronda": ronda,
+            "local": local,
+            "visitante": visitante,
+            "goles_local": gl,
+            "goles_visitante": gv,
+        })
+
+    raw = None
+    if snapshot:
+        raw = (
+            "fbref",
+            FBREF_GETAFE_UECL_URL,
+            "fbref_snapshot",
+            json.dumps(snapshot, ensure_ascii=False),
+        )
+    return out, raw
+
+
+def cargar_2026_27(
+    clave: str, idx: dict[str, Equipo],
+) -> tuple[list[Partido], list[tuple[str, str, str, str]]]:
+    comp = COMPETICIONES[clave]
+    raws: list[tuple[str, str, str, str]] = []
+
+    if clave == "copa":
+        url = URLS_2026_27["copa"]
+        print(f"Comprobando Copa del Rey actual: {url}")
+        html, final_url = descargar_copa_actual_si_existe(url)
+        if html is None or final_url is None:
+            return [], raws
+
+        ps, total = parse_wikipedia_copa_actual(
+            html, temporada=TEMPORADA_ACTUAL, url=final_url, idx=idx
+        )
+        print(
+            f"  Copa 2026-27: fichas con fecha/hora={total}; "
+            f"relevantes={len(ps)}"
+        )
+        if ps:
+            raws.append(("wikipedia", final_url, "wiki_current", html))
+        return ps, raws
+
+    if clave == "supercopa":
+        print(
+            "Supercopa 2027: participantes/cruces conocidos, pero todavía "
+            "sin hora exacta de los partidos. Se omite para no inventar datos."
+        )
+        return [], raws
+
+    url = URLS_2026_27[clave]
+    print(f"Descargando {comp} actual: {url}")
+    data, raw = descargar_json(url)
+    ps = parse_fixturedownload(
+        data,
+        temporada=TEMPORADA_ACTUAL,
+        competicion=comp,
+        url=url,
+        idx=idx,
+        min_total=FIXTURE_MIN_TOTAL_ACTUAL[clave],
+        permitir_programados=True,
+        permitir_cero_relevantes=False,
+    )
+
+    finalizados = sum(p.estado == "FINALIZADO" for p in ps)
+    programados = sum(p.estado == "PROGRAMADO" for p in ps)
+    print(
+        f"  FixtureDownload OK: {len(data)} partidos fuente; "
+        f"relevantes={len(ps)} "
+        f"(finalizados={finalizados}, programados={programados})"
+    )
+    raws.append(("fixturedownload", url, "fixture_json", raw))
+
+    if clave == "conference":
+        qps, qraw = partidos_getafe_previa_2026_27(idx)
+        print(f"  previa Conference Getafe ya jugada: {len(qps)} partidos")
+        ps.extend(qps)
+        if qraw is not None:
+            raws.append(qraw)
+
+    return ps, raws
 
 def fecha_de_linea(linea: str, temporada: str) -> str | None:
     m = DATE_LINE_RE.match(linea.strip())
@@ -747,11 +1077,6 @@ def main() -> None:
                     choices=("todas", "copa", "supercopa", "champions", "europa", "conference"))
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
-    if args.temporada not in TEMPORADAS_OK:
-        raise RuntimeError(
-            f"La v2 está validada para {', '.join(TEMPORADAS_OK)}. "
-            f"No ejecuto {args.temporada} para no introducir otra fuente sin validar."
-        )
     api = ApiIngesta()
     health = api.health()
     print("Puente IONOS OK ->", health.get("database"), health.get("db_version"))
@@ -764,7 +1089,13 @@ def main() -> None:
     partidos: list[Partido] = []
     raws: list[tuple[str, str, str, str]] = []
     for clave in seleccion_claves(args.competicion):
-        if args.temporada == "2025-26":
+        if args.temporada == TEMPORADA_ACTUAL:
+            ps, nuevos_raws = cargar_2026_27(clave, idx)
+            partidos.extend(ps)
+            raws.extend(nuevos_raws)
+            continue
+
+        if args.temporada == TEMPORADA_CERRADA_MIXTA:
             ps, nuevos_raws = cargar_2025_26(clave, idx)
             if clave == "supercopa":
                 print(f"Supercopa: {len(ps)} partidos relevantes")
@@ -798,11 +1129,23 @@ def main() -> None:
             por_comp[p.competicion] = por_comp.get(p.competicion, 0) + 1
         for comp, n in sorted(por_comp.items()):
             print(f"  {comp}: {n}")
-        print(f"TOTAL relevantes: {len(partidos)}")
+        print(
+            f"TOTAL relevantes: {len(partidos)} | "
+            f"finalizados={sum(p.estado == 'FINALIZADO' for p in partidos)} | "
+            f"programados={sum(p.estado == 'PROGRAMADO' for p in partidos)}"
+        )
         return
+
+    if not partidos:
+        print(
+            "\nOK: no hay partidos relevantes con fecha/hora suficiente para "
+            f"guardar en {args.temporada}. No se abre lote vacío."
+        )
+        return
+
     lote = api.iniciar_lote(
-        fuente="multi-futbol" if args.temporada == "2025-26" else "openfootball", tipo_fuente="cal_extra",
-        notas=f"Competiciones masculinas v2.3 {args.temporada}; seleccion={args.competicion}; sin Transfermarkt",
+        fuente="multi-futbol" if args.temporada in {"2025-26", "2026-27"} else "openfootball", tipo_fuente="cal_extra",
+        notas=f"Competiciones masculinas v2.4 {args.temporada}; seleccion={args.competicion}; sin Transfermarkt",
     )
     print("Lote abierto:", lote)
     for fuente, url, tipo_contenido, contenido in raws:
@@ -817,7 +1160,7 @@ def main() -> None:
             "lote_id": lote, "fuente": p.fuente, "id_partido_fuente": p.id_fuente,
             "temporada": args.temporada, "competicion": p.competicion, "ronda": p.ronda,
             "es_clasificatoria": p.es_clasificatoria, "fecha_hora_inicio": p.fecha_sql,
-            "hora_confirmada": True, "estado": "FINALIZADO",
+            "hora_confirmada": p.hora_confirmada, "estado": p.estado,
             "equipo_local_id": p.equipo_local_id, "equipo_visitante_id": p.equipo_visitante_id,
             "local_nombre": p.local, "visitante_nombre": p.visitante,
             "local_id_fuente": None, "visitante_id_fuente": None,
@@ -829,7 +1172,16 @@ def main() -> None:
             res = api._request_json("POST", "guardar_partido_complementario.php", json=payload, timeout=60)
             if res.get("accion") == "creado": creados += 1
             else: actualizados += 1
-            print(f"{p.fecha_sql[:16]} [{p.competicion}] {p.local} {p.goles_local}-{p.goles_visitante} {p.visitante} -> {res.get('accion')}")
+            marcador = (
+                f"{p.goles_local}-{p.goles_visitante}"
+                if p.goles_local is not None and p.goles_visitante is not None
+                else "?-?"
+            )
+            print(
+                f"{p.fecha_sql[:16]} [{p.competicion}] "
+                f"{p.local} {marcador} {p.visitante} "
+                f"[{p.estado}] -> {res.get('accion')}"
+            )
         except Exception as exc:
             errores += 1
             msg = f"{p.competicion} {p.local}-{p.visitante}: {exc}"
@@ -837,7 +1189,7 @@ def main() -> None:
             print("ERROR:", msg)
     api.finalizar_lote(
         lote, estado="completado" if errores == 0 else "error",
-        notas=f"v2.3; partidos={len(partidos)}; creados={creados}; actualizados={actualizados}; errores={errores}",
+        notas=f"v2.4; partidos={len(partidos)}; creados={creados}; actualizados={actualizados}; errores={errores}",
     )
     print(f"\nRESUMEN {args.temporada}: creados={creados}, actualizados={actualizados}, errores={errores}, total={len(partidos)}")
     if mensajes:
