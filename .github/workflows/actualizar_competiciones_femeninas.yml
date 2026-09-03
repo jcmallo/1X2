@@ -1,4 +1,4 @@
-name: Backfill competiciones femeninas
+name: actualizar competiciones femeninas
 
 on:
   workflow_dispatch:
