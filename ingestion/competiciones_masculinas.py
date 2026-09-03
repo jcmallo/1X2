@@ -31,9 +31,14 @@ from api_client import ApiIngesta
 
 
 FUENTE = "transfermarkt.com"
-BASE = "https://www.transfermarkt.com"
+BASE = "https://www.transfermarkt.es"
 
 TEMPORADAS = ("2022-23", "2023-24", "2024-25", "2025-26", "2026-27")
+
+ROSTER_URLS = (
+    "/laliga/startseite/wettbewerb/ES1/saison_id/{anio}",
+    "/laliga2/startseite/wettbewerb/ES2/saison_id/{anio}",
+)
 
 COMPETICIONES = {
     "copa": "Copa del Rey",
@@ -43,30 +48,51 @@ COMPETICIONES = {
     "conference": "UEFA Conference League",
 }
 
-HEADER_MAP = {
-    "copa del rey": ("Copa del Rey", False),
-    "supercopa": ("Supercopa de España", False),
-    "spanish super cup": ("Supercopa de España", False),
+def clasificar_encabezado(texto: str) -> tuple[str, bool] | None:
+    """
+    Clasifica encabezados tanto en español como en inglés.
 
-    "uefa champions league": ("UEFA Champions League", False),
-    "champions league": ("UEFA Champions League", False),
-    "uefa champions league qualifying": ("UEFA Champions League", True),
-    "champions league qualifying": ("UEFA Champions League", True),
+    Transfermarkt.es usa, por ejemplo:
+      Copa del Rey
+      Supercopa de España
+      UEFA Champions League
+    y puede anteponer "Clasificación" en rondas previas UEFA.
+    """
+    n = norm(texto)
 
-    "uefa europa league": ("UEFA Europa League", False),
-    "europa league": ("UEFA Europa League", False),
-    "uefa europa league qualifying": ("UEFA Europa League", True),
-    "europa league qualifying": ("UEFA Europa League", True),
+    if "copa del rey" in n:
+        return ("Copa del Rey", False)
 
-    "uefa conference league": ("UEFA Conference League", False),
-    "conference league": ("UEFA Conference League", False),
-    "uefa europa conference league": ("UEFA Conference League", False),
-    "europa conference league": ("UEFA Conference League", False),
-    "uefa conference league qualifying": ("UEFA Conference League", True),
-    "conference league qualifying": ("UEFA Conference League", True),
-    "uefa europa conference league qualifying": ("UEFA Conference League", True),
-    "europa conference league qualifying": ("UEFA Conference League", True),
-}
+    if "supercopa de espana" in n or "spanish super cup" in n:
+        return ("Supercopa de España", False)
+
+    # Conference antes que Europa para no confundir "Europa Conference".
+    if "conference league" in n:
+        clasif = (
+            "clasificacion" in n
+            or "qualifying" in n
+            or "qualification" in n
+        )
+        return ("UEFA Conference League", clasif)
+
+    if "champions league" in n:
+        clasif = (
+            "clasificacion" in n
+            or "qualifying" in n
+            or "qualification" in n
+        )
+        return ("UEFA Champions League", clasif)
+
+    if "europa league" in n:
+        clasif = (
+            "clasificacion" in n
+            or "qualifying" in n
+            or "qualification" in n
+        )
+        return ("UEFA Europa League", clasif)
+
+    return None
+
 
 # Solo para mejorar la búsqueda de Transfermarkt; no cambia el nombre canónico BD.
 BUSQUEDA_ALIAS = {
@@ -205,6 +231,157 @@ def query_equipo(nombre: str) -> str:
     return BUSQUEDA_ALIAS.get(norm(nombre), nombre)
 
 
+
+def extraer_candidatos_competicion(
+    html: str,
+    *,
+    anio: str,
+) -> dict[str, tuple[str, str]]:
+    """
+    Devuelve {tm_id: (nombre, slug)} leyendo la lista de clubes de la
+    página de LaLiga/Segunda de esa temporada.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    candidatos: dict[str, tuple[str, str]] = {}
+
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "")
+        if "/startseite/verein/" not in href:
+            continue
+
+        m = re.search(r"/startseite/verein/(\d+)", href)
+        if not m:
+            continue
+
+        tm_id = m.group(1)
+        nombre = (a.get("title") or "").strip()
+        if not nombre:
+            nombre = " ".join(a.stripped_strings).strip()
+        if not nombre:
+            continue
+
+        partes = href.strip("/").split("/")
+        slug = partes[0] if partes else slugify(nombre)
+
+        # En la página también puede haber enlaces repetidos al mismo club.
+        # Preferimos el que tenga un nombre real.
+        previo = candidatos.get(tm_id)
+        if previo is None or len(nombre) > len(previo[0]):
+            candidatos[tm_id] = (nombre, slug)
+
+    return candidatos
+
+
+def resolver_equipos_desde_ligas(
+    session: requests.Session,
+    equipos: list[Equipo],
+    temporada: str,
+) -> None:
+    """
+    Resuelve IDs Transfermarkt desde las páginas de participantes de
+    LaLiga y Segunda. Esto evita /schnellsuche/, que actualmente puede
+    devolver una página sin candidatos a GitHub Actions.
+    """
+    anio = temporada.split("-")[0]
+    candidatos: dict[str, tuple[str, str]] = {}
+
+    for tpl in ROSTER_URLS:
+        url = BASE + tpl.format(anio=anio)
+        print(f"Descargando participantes: {url}")
+        r = get_retry(session, url)
+        encontrados = extraer_candidatos_competicion(r.text, anio=anio)
+        print(f"    clubes Transfermarkt detectados: {len(encontrados)}")
+        candidatos.update(encontrados)
+        time.sleep(1.0)
+
+    if len(candidatos) < 35:
+        raise RuntimeError(
+            f"Solo detecté {len(candidatos)} clubes en las páginas de "
+            f"LaLiga/Segunda {temporada}; esperaba aproximadamente 42."
+        )
+
+    usados: set[str] = {
+        str(e.transfermarkt_id)
+        for e in equipos
+        if e.transfermarkt_id
+    }
+
+    errores: list[str] = []
+
+    for e in equipos:
+        if e.transfermarkt_id:
+            # Recuperar slug si aparece en la lista.
+            row = candidatos.get(str(e.transfermarkt_id))
+            if row:
+                e.transfermarkt_slug = row[1]
+            continue
+
+        buscado = query_equipo(e.nombre)
+        ranking = []
+
+        for tm_id, (nombre_tm, slug) in candidatos.items():
+            if tm_id in usados:
+                continue
+
+            score = max(
+                score_nombre(e.nombre, nombre_tm),
+                score_nombre(buscado, nombre_tm),
+            )
+
+            # Ajustes de nombres que Transfermarkt expresa de forma distinta.
+            na = norm(e.nombre)
+            nb = norm(nombre_tm)
+
+            if na == "athletic club" and "athletic" in nb:
+                score = max(score, 0.98)
+            if na == "r racing club" and "racing" in nb:
+                score = max(score, 0.98)
+            if na == "real sporting" and "sporting" in nb:
+                score = max(score, 0.98)
+            if na == "villarreal b" and "villarreal" in nb and " b" in f" {nb}":
+                score = max(score, 0.98)
+            if na == "albacete bp" and "albacete" in nb:
+                score = max(score, 0.98)
+
+            ranking.append((score, tm_id, nombre_tm, slug))
+
+        ranking.sort(reverse=True)
+
+        if not ranking or ranking[0][0] < 0.62:
+            errores.append(
+                f"{e.nombre}: sin coincidencia segura. "
+                f"Top={ranking[:3]}"
+            )
+            continue
+
+        score, tm_id, nombre_tm, slug = ranking[0]
+
+        # Exigir separación frente al segundo candidato cuando no es casi exacto.
+        if (
+            score < 0.90
+            and len(ranking) > 1
+            and score - ranking[1][0] < 0.08
+        ):
+            errores.append(
+                f"{e.nombre}: coincidencia ambigua. Top={ranking[:3]}"
+            )
+            continue
+
+        e.transfermarkt_id = tm_id
+        e.transfermarkt_slug = slug
+        usados.add(tm_id)
+
+        print(
+            f"    Transfermarkt: {e.nombre} -> {nombre_tm} "
+            f"(id={tm_id}, score={score:.2f})"
+        )
+
+    if errores:
+        raise RuntimeError(
+            "No pude reconciliar todos los equipos desde ES1/ES2:\n - "
+            + "\n - ".join(errores)
+        )
+
 def resolver_transfermarkt(
     session: requests.Session,
     equipo: Equipo,
@@ -313,10 +490,9 @@ def encabezado_competicion(table) -> tuple[str, bool] | None:
             candidatos.append(h.get_text(" ", strip=True))
 
     for texto in candidatos:
-        n = norm(texto)
-        for clave, val in HEADER_MAP.items():
-            if n == clave or n.startswith(clave + " "):
-                return val
+        comp = clasificar_encabezado(texto)
+        if comp is not None:
+            return comp
     return None
 
 
@@ -503,7 +679,7 @@ def parse_table(
 
         hubo_prorroga = bool(
             resultado_raw
-            and re.search(r"\b(AET|ET)\b|extra time", resultado_raw, re.I)
+            and re.search(r"\b(AET|ET)\b|extra time|pr[oó]\.?|pr[oó]rroga", resultado_raw, re.I)
         )
         hubo_penaltis = bool(
             resultado_raw
@@ -785,36 +961,15 @@ def main() -> None:
     tm = session_transfermarkt()
 
     # ---------------------------------------------------------------
-    # Fase A: resolver IDs Transfermarkt de TODOS los equipos seguidos.
-    # Así, al encontrar Real Madrid-Barcelona, podemos enlazar ambos IDs
-    # sin crear a ningún rival externo.
+    # Fase A: resolver IDs desde las listas de participantes de LaLiga
+    # y Segunda en Transfermarkt.es. No usamos schnellsuche.
     # ---------------------------------------------------------------
-    errores_mapping: list[str] = []
+    resolver_equipos_desde_ligas(tm, equipos, args.temporada)
 
-    for idx, e in enumerate(equipos, start=1):
-        print(f"[MAP {idx}/{len(equipos)}] {e.nombre}")
-        if e.transfermarkt_id:
-            print(f"    id guardado: {e.transfermarkt_id}")
-            continue
-        try:
-            tm_id, slug = resolver_transfermarkt(tm, e)
-            e.transfermarkt_id = tm_id
-            e.transfermarkt_slug = slug
-            if not args.dry_run:
+    if not args.dry_run:
+        for e in equipos:
+            if e.transfermarkt_id:
                 guardar_mapping(api, e)
-            time.sleep(max(0.0, args.pausa))
-        except Exception as exc:
-            errores_mapping.append(f"{e.nombre}: {exc}")
-            print("    ERROR mapping:", exc)
-
-    if errores_mapping:
-        print("\nERRORES DE MAPPING:")
-        for x in errores_mapping:
-            print(" -", x)
-        raise RuntimeError(
-            f"No continúo: {len(errores_mapping)} equipo(s) "
-            "no pudieron reconciliarse con Transfermarkt."
-        )
 
     tm_to_db = {
         str(e.transfermarkt_id): e.equipo_id
