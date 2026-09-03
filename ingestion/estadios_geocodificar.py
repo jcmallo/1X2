@@ -85,6 +85,7 @@ def esperar_rate_limit() -> None:
 
 def consultar_nominatim(
     query: str,
+    countrycode: str | None = None,
 ) -> tuple[str, list[dict], dict, str, str]:
     global _ultima_peticion
 
@@ -92,11 +93,12 @@ def consultar_nominatim(
         "q": query,
         "format": "jsonv2",
         "limit": 5,
-        "countrycodes": "es",
         "addressdetails": 1,
         "namedetails": 1,
         "extratags": 1,
     }
+    if countrycode:
+        params["countrycodes"] = countrycode
 
     esperar_rate_limit()
     solicitado = ahora_sql()
@@ -169,7 +171,11 @@ def puntuar(
         if any(p in display for p in palabras):
             score += 1
 
-    if "espana" in display or "spain" in display:
+    if (
+        "espana" in display
+        or "spain" in display
+        or "andorra" in display
+    ):
         score += 1
 
     return score
@@ -200,24 +206,57 @@ def buscar_estadio(item: dict) -> dict | None:
     )
     equipo = primer_equipo(item.get("contexto_equipos"))
 
-    queries = []
+    # Las competiciones españolas pueden incluir clubes fuera de España.
+    # Caso actual relevante: FC Andorra. No debemos forzar countrycodes=es.
+    texto_contexto = normalizar(
+        f"{estadio} {equipo or ''} {item.get('contexto_equipos') or ''}"
+    )
+    es_andorra = (
+        "fc andorra" in texto_contexto
+        or "nou estadi de la faf" in texto_contexto
+    )
+
+    if es_andorra:
+        pais = "Andorra"
+        countrycode = "ad"
+    else:
+        pais = "España"
+        countrycode = "es"
+
+    consultas: list[tuple[str, str | None]] = []
 
     if ciudad:
-        queries.append(f"{estadio}, {ciudad}, España")
+        consultas.append(
+            (f"{estadio}, {ciudad}, {pais}", countrycode)
+        )
 
     if equipo:
-        queries.append(f"{estadio}, {equipo}, España")
+        consultas.append(
+            (f"{estadio}, {equipo}, {pais}", countrycode)
+        )
 
-    queries.append(f"{estadio}, España")
+    consultas.append((f"{estadio}, {pais}", countrycode))
+
+    # Fallback sin filtro de país. Solo se acepta si la puntuación es clara.
+    # Esto cubre estadios de clubes participantes en ligas españolas que
+    # físicamente estén fuera de España, sin convertir la búsqueda global
+    # en la primera opción.
+    if equipo:
+        consultas.append((f"{estadio}, {equipo}", None))
+    consultas.append((estadio, None))
 
     vistas = set()
 
-    for query in queries:
-        if normalizar(query) in vistas:
+    for query, cc in consultas:
+        clave = (normalizar(query), cc or "")
+        if clave in vistas:
             continue
-        vistas.add(normalizar(query))
+        vistas.add(clave)
 
-        raw, datos, params, solicitado, respondido = consultar_nominatim(query)
+        raw, datos, params, solicitado, respondido = consultar_nominatim(
+            query,
+            countrycode=cc,
+        )
 
         if not datos:
             continue
