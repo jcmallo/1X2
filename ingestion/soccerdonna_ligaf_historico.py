@@ -51,6 +51,7 @@ CANONICOS = {
     "ud tenerife": "Costa Adeje Tenerife",
     "udg tenerife sur": "Costa Adeje Tenerife",
     "costa adeje tenerife": "Costa Adeje Tenerife",
+    "cd tenerife femenino": "Costa Adeje Tenerife",  # nombre usado por SoccerDonna en 2025-26
     "tenerife fem": "Costa Adeje Tenerife",
     "sevilla fc": "Sevilla FC Femenino",
     "fc sevilla": "Sevilla FC Femenino",
@@ -89,6 +90,7 @@ CANONICOS = {
     "deportivo abanca": "Deportivo Abanca",
     "dux logrono": "Logroño United",
     "logrono united": "Logroño United",
+    "edf logrono": "Logroño United",  # denominación histórica usada por SoccerDonna
 }
 
 PATRON_FICHA = re.compile(r"spielbericht_(\d+)\.html", re.I)
