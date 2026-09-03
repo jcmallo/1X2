@@ -4,8 +4,11 @@ Carga las plantillas actuales 2026-27 de:
 - LALIGA HYPERMOTION
 - Liga F
 
-Corrección v2:
+Corrección v3:
+- Corrige reejecuciones/idempotencia del guardado PHP.
 - Liga F: mantiene el parser HTML que ya funcionó.
+- LALIGA/Segunda: usa players/stats como plantilla completa por temporada
+  y squad solo para enriquecer biografía.
 - LALIGA/Segunda: usa el JSON que alimenta laliga.com
   (Azure APIM / public-service), porque la tabla visible de estadísticas
   no expone enlaces /jugador/ en el HTML que recibe requests/GitHub Actions.
@@ -62,6 +65,8 @@ session.headers.update(
 )
 
 _apim_key_cache: str | None = None
+_stats_cache: dict[str, list[dict]] = {}
+_stats_raw_guardados: set[str] = set()
 
 
 def ahora_sql() -> str:
@@ -530,10 +535,13 @@ def parse_player_stats_equipo(
 def obtener_player_stats_subscription(
     subscription: str,
 ) -> tuple[list[dict], list[tuple[str, dict]]]:
+    if subscription in _stats_cache:
+        return _stats_cache[subscription], []
+
     todos: list[dict] = []
     raws: list[tuple[str, dict]] = []
 
-    for offset in range(0, 1500, 100):
+    for offset in range(0, 2000, 100):
         path = (
             f"/api/v1/subscriptions/{subscription}/players/stats"
             f"?limit=100&offset={offset}"
@@ -551,11 +559,16 @@ def obtener_player_stats_subscription(
             x for x in pagina if isinstance(x, dict)
         )
 
+        total = data.get("total")
+        if isinstance(total, int) and len(todos) >= total:
+            break
+
         if len(pagina) < 100:
             break
 
         time.sleep(0.08)
 
+    _stats_cache[subscription] = todos
     return todos, raws
 
 
@@ -714,39 +727,13 @@ def procesar_laliga(
     competicion = str(item["competicion"])
     subscription = subscription_actual(competicion)
 
-    path = (
-        f"/api/v1/teams/{quote(team_slug, safe='-')}/squad"
-        f"?subscription={quote(subscription, safe='-')}"
-    )
+    # La fuente de verdad de la plantilla de UNA TEMPORADA será players/stats:
+    # devuelve todos los futbolistas registrados en esa temporada y permite
+    # reconstruir histórico. Se descarga solo una vez por competición.
+    registros, raws = obtener_player_stats_subscription(subscription)
 
-    data, final_url = pedir_json_laliga(path)
-
-    guardar_raw(
-        api,
-        lote_id,
-        "laliga.com-apim",
-        final_url,
-        "plantilla_laliga_json",
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
-    )
-
-    jugadores = parse_squad_laliga(data)
-
-    # Fallback defensivo: si squad viniera incompleto, recuperar los jugadores
-    # de la temporada desde player_stats y filtrar por equipo.
-    if len(jugadores) < 15:
-        print(
-            f"    squad devolvió {len(jugadores)}; "
-            "probando player_stats..."
-        )
-
-        registros, raws = obtener_player_stats_subscription(subscription)
-
-        for raw_url, raw_data in raws:
+    for raw_url, raw_data in raws:
+        if raw_url not in _stats_raw_guardados:
             guardar_raw(
                 api,
                 lote_id,
@@ -759,17 +746,65 @@ def procesar_laliga(
                     separators=(",", ":"),
                 ),
             )
+            _stats_raw_guardados.add(raw_url)
 
-        jugadores = parse_player_stats_equipo(
-            registros,
-            team_slug,
-        )
+    jugadores = parse_player_stats_equipo(
+        registros,
+        team_slug,
+    )
 
     if len(jugadores) < 15:
         raise RuntimeError(
-            f"LALIGA API solo encontró {len(jugadores)} jugadores "
+            f"player_stats solo encontró {len(jugadores)} jugadores "
             f"para {team_slug}."
         )
+
+    # Enriquecer los que estén presentes en el squad actual con bio:
+    # fecha de nacimiento, nacionalidad y altura.
+    # IMPORTANTE: el squad es CURRENT; no se usa como fuente histórica
+    # de pertenencia, solo para enriquecer datos personales del mismo opta_id.
+    try:
+        path_squad = (
+            f"/api/v1/teams/{quote(team_slug, safe='-')}/squad"
+            f"?subscription={quote(subscription, safe='-')}"
+        )
+        squad_data, squad_url = pedir_json_laliga(path_squad)
+
+        guardar_raw(
+            api,
+            lote_id,
+            "laliga.com-apim",
+            squad_url,
+            "plantilla_laliga_squad_json",
+            json.dumps(
+                squad_data,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+
+        squad = {
+            j["id_fuente"]: j
+            for j in parse_squad_laliga(squad_data)
+        }
+
+        for j in jugadores:
+            enriquecido = squad.get(j["id_fuente"])
+            if not enriquecido:
+                continue
+            for campo in (
+                "fecha_nacimiento",
+                "nacionalidad",
+                "altura_cm",
+                "posicion_principal",
+                "dorsal",
+            ):
+                if j.get(campo) is None and enriquecido.get(campo) is not None:
+                    j[campo] = enriquecido[campo]
+    except Exception as exc:
+        # La plantilla completa ya procede de player_stats.
+        # Un fallo de enriquecimiento no debe bloquear la carga.
+        print(f"    aviso enriquecimiento squad: {exc}")
 
     res = api.guardar_plantilla(
         {
