@@ -313,7 +313,7 @@ def payload_partido(
         "local": {"nombre": p.local, "id_fuente": p.local_slug},
         "visitante": {"nombre": p.visitante, "id_fuente": p.visitante_slug},
         "estadio_nombre": None,
-        "tipo_contenido_raw": "partido_laliga_historico_desde_jornada",
+        "tipo_contenido_raw": "laliga_hist_partido",
         "documento_url": url_jornada,
         "contenido_raw": raw,
         "obtenido_en": ahora_sql(),
@@ -398,7 +398,7 @@ def main() -> None:
                     "lote_id": lote,
                     "fuente": FUENTE,
                     "url": url,
-                    "tipo_contenido": f"resultados_historicos_{cfg['slug']}",
+                    "tipo_contenido": "laliga_hist_jornada",
                     "obtenido_en": ahora_sql(),
                     "contenido": html,
                 }

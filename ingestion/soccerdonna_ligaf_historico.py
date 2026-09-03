@@ -304,7 +304,7 @@ def parse_partido(url: str, html: str, temporada: str) -> dict:
         "local": {"nombre": local, "id_fuente": id_local},
         "visitante": {"nombre": visitante, "id_fuente": id_visitante},
         "estadio_nombre": parse_estadio(soup),
-        "tipo_contenido_raw": "partido_soccerdonna_ligaf_historico",
+        "tipo_contenido_raw": "sd_ligaf_hist_partido",
         "documento_url": url,
         "contenido_raw": html,
         "obtenido_en": ahora_sql(),
@@ -368,7 +368,7 @@ def main() -> None:
                     "lote_id": lote,
                     "fuente": FUENTE,
                     "url": url,
-                    "tipo_contenido": "soccerdonna_ligaf_jornada",
+                    "tipo_contenido": "sd_ligaf_hist_jornada",
                     "obtenido_en": ahora_sql(),
                     "contenido": html_jornada,
                 }
