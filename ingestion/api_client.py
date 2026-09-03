@@ -303,6 +303,43 @@ class ApiIngesta:
             timeout=60,
         )
 
+    def contexto_historico_estado(
+        self,
+        temporada: str,
+    ) -> dict[str, dict]:
+        data = self._request_json(
+            "GET",
+            "contexto_historico_estado.php",
+            params={"temporada": temporada},
+            timeout=60,
+        )
+        items = data.get("items", [])
+        if not isinstance(items, list):
+            raise RuntimeError(
+                "La API devolvió 'items' histórico con formato inválido."
+            )
+        salida: dict[str, dict] = {}
+        for item in items:
+            if isinstance(item, dict) and item.get("id_partido_fuente") is not None:
+                salida[str(item["id_partido_fuente"])] = item
+        return salida
+
+    def guardar_partido_historico(self, payload: dict) -> dict:
+        return self._request_json(
+            "POST",
+            "guardar_partido_historico.php",
+            json=payload,
+            timeout=90,
+        )
+
+    def guardar_detalle_historico(self, payload: dict) -> dict:
+        return self._request_json(
+            "POST",
+            "guardar_detalle_historico.php",
+            json=payload,
+            timeout=120,
+        )
+
     def finalizar_lote(
         self,
         lote_id: int,
