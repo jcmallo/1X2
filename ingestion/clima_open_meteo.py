@@ -76,7 +76,7 @@ def pedir_prevision(latitud: float, longitud: float) -> tuple[str, dict, dict]:
     respuesta = requests.get(
         OPEN_METEO_URL,
         params=parametros,
-        timeout=25,
+        timeout=90,
         headers={"User-Agent": "quiniela-1x2-ingestor/1.0"},
     )
     respuesta.raise_for_status()
