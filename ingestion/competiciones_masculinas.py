@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Backfill de competiciones masculinas complementarias - v2.
+Backfill de competiciones masculinas complementarias - v2.2.
 
 CAMBIO CLAVE: Transfermarkt queda eliminado del proceso. No se usa HTML con
 JavaScript/anti-bot ni búsqueda de IDs externos.
@@ -63,6 +63,9 @@ ALIAS_A_CANONICO = {
     "celta vigo": "celta",
     "sporting gijon": "real sporting",
     "real valladolid": "real valladolid cf",
+    "real madrid cf": "real madrid",
+    "club atletico de madrid": "atletico de madrid",
+    "real sociedad de futbol": "real sociedad",
     "villarreal cf b": "villarreal b",
     "villarreal b": "villarreal b",
 }
@@ -125,8 +128,14 @@ def norm(texto: str) -> str:
 def quitar_pais(nombre: str) -> str:
     return COUNTRY_SUFFIX_RE.sub("", nombre).strip()
 
+def limpiar_nombre_fuente(nombre: str) -> str:
+    nombre = quitar_pais(nombre)
+    # OpenFootball puede añadir anotaciones al final del club.
+    nombre = re.sub(r"\s+\[[^\]]+\]\s*$", "", nombre).strip()
+    return nombre
+
 def canonical_key(nombre: str) -> str:
-    n = norm(quitar_pais(nombre))
+    n = norm(limpiar_nombre_fuente(nombre))
     return ALIAS_A_CANONICO.get(n, n)
 
 def indice_equipos(equipos: Iterable[Equipo]) -> dict[str, Equipo]:
@@ -185,12 +194,30 @@ def resultado_principal(resultado: str) -> tuple[int | None, int | None, bool, b
     return int(gl), int(gv), aet, pen
 
 def separar_copa(cuerpo: str) -> tuple[str, str, str] | None:
+    """
+    OpenFootball usa dos formatos distintos para Copa del Rey:
+
+    2022-23 / 2023-24:
+        LOCAL 1-0 (0-0) VISITANTE
+
+    2024-25:
+        LOCAL v VISITANTE 1-0 (0-0)
+
+    Detectamos explícitamente el formato en vez de asumir uno solo.
+    """
+    # Formato nuevo: LOCAL v VISITANTE RESULTADO
+    if re.search(r"\s+v\s+", cuerpo):
+        return separar_uefa(cuerpo)
+
+    # Formato antiguo: LOCAL RESULTADO VISITANTE
     matches = list(SCORE_RE.finditer(cuerpo))
     if not matches:
         return None
+
     inicio = matches[0].start()
     local = cuerpo[:inicio].strip()
     resto = cuerpo[inicio:].strip()
+
     patron = re.compile(
         r"^((?:\d{1,2}-\d{1,2}\s+pen\.\s+)?"
         r"\d{1,2}-\d{1,2}(?:\s+a\.e\.t\.)?"
@@ -199,8 +226,13 @@ def separar_copa(cuerpo: str) -> tuple[str, str, str] | None:
     m = patron.match(resto)
     if not m:
         return None
+
     resultado, visitante = m.groups()
-    return local, visitante.strip(), resultado.strip()
+    return (
+        limpiar_nombre_fuente(local),
+        limpiar_nombre_fuente(visitante),
+        resultado.strip(),
+    )
 
 def separar_uefa(cuerpo: str) -> tuple[str, str, str] | None:
     partes = re.split(r"\s+v\s+", cuerpo, maxsplit=1)
@@ -214,7 +246,7 @@ def separar_uefa(cuerpo: str) -> tuple[str, str, str] | None:
     inicio = matches[0].start()
     visitante = der[:inicio].strip()
     resultado = der[inicio:].strip()
-    return quitar_pais(local), quitar_pais(visitante), resultado
+    return limpiar_nombre_fuente(local), limpiar_nombre_fuente(visitante), resultado
 
 def parse_openfootball(texto: str, *, temporada: str, competicion: str, url: str,
                        idx: dict[str, Equipo]) -> list[Partido]:
@@ -222,6 +254,10 @@ def parse_openfootball(texto: str, *, temporada: str, competicion: str, url: str
     hora: str | None = None
     ronda: str | None = None
     out: list[Partido] = []
+
+    m_esperados = re.search(r"(?m)^# Matches\s+(\d+)\s*$", texto)
+    esperados_fuente = int(m_esperados.group(1)) if m_esperados else None
+    parseados_fuente = 0
     for raw in texto.splitlines():
         stripped = raw.strip()
         if not stripped or stripped.startswith("#") or stripped.startswith("="):
@@ -250,6 +286,9 @@ def parse_openfootball(texto: str, *, temporada: str, competicion: str, url: str
         gl, gv, prorroga, penaltis = resultado_principal(resultado)
         if gl is None or gv is None:
             continue
+
+        parseados_fuente += 1
+
         local_db = resolver_equipo(local, idx)
         visitante_db = resolver_equipo(visitante, idx)
         if local_db is None and visitante_db is None:
@@ -273,6 +312,15 @@ def parse_openfootball(texto: str, *, temporada: str, competicion: str, url: str
             equipo_local_id=local_db.equipo_id if local_db else None,
             equipo_visitante_id=visitante_db.equipo_id if visitante_db else None,
         ))
+    if esperados_fuente is not None:
+        minimo = max(1, int(esperados_fuente * 0.90))
+        if parseados_fuente < minimo:
+            raise RuntimeError(
+                f"Parser OpenFootball solo reconoció {parseados_fuente}/"
+                f"{esperados_fuente} partidos de la fuente para "
+                f"{competicion} {temporada}. No se escribirá nada."
+            )
+
     if not out:
         raise RuntimeError(
             f"Parser OpenFootball devolvió 0 partidos relevantes para {competicion} {temporada}. "
