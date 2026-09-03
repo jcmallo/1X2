@@ -1,69 +1,70 @@
-"""Prueba local: simula la respuesta de Open-Meteo y ejecuta el resto del
-pipeline real (RAW + CLEAN) contra una base de datos MariaDB de verdad."""
+"""
+Tests locales sin Internet para las funciones puras del ingestor.
+Ejecutar:
+    python ingestion/test_local_clima.py
+"""
 
-import json
-import os
-import sys
-from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from datetime import datetime, timezone
 
-sys.path.insert(0, os.path.dirname(__file__) + "/../ingestion")
-
-os.environ["DB_HOST"] = "127.0.0.1"
-os.environ["DB_PORT"] = "3306"
-os.environ["DB_USER"] = "test_user"
-os.environ["DB_PASSWORD"] = "test_pass_123"
-os.environ["DB_NAME"] = "quiniela_test"
-
-import clima_open_meteo as mod  # noqa: E402
+from clima_open_meteo import punto_horario_mas_cercano, construir_payload_guardado
 
 
-def payload_simulado():
-    """Respuesta realista de Open-Meteo: 72 horas a partir de ahora."""
-    inicio = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    horas = [(inicio + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M") for i in range(72)]
-    n = len(horas)
-    datos = {
-        "latitude": 43.26,
-        "longitude": -2.95,
-        "hourly": {
-            "time": horas,
-            "temperature_2m": [18.5 + (i % 5) for i in range(n)],
-            "precipitation": [0.0 if i % 7 else 1.2 for i in range(n)],
-            "precipitation_probability": [10 if i % 7 else 60 for i in range(n)],
-            "relative_humidity_2m": [65 for _ in range(n)],
-            "wind_speed_10m": [12.4 for _ in range(n)],
-            "wind_gusts_10m": [22.1 for _ in range(n)],
-            "surface_pressure": [1013.2 for _ in range(n)],
-            "cloud_cover": [40 for _ in range(n)],
-            "visibility": [24140.0 for _ in range(n)],
-        },
+def test_punto_cercano():
+    hourly = {
+        "time": [
+            "2026-09-04T04:00",
+            "2026-09-04T05:00",
+            "2026-09-04T06:00",
+        ]
     }
-    return json.dumps(datos), datos
+    objetivo = datetime(2026, 9, 4, 5, 20, tzinfo=timezone.utc)
+    assert punto_horario_mas_cercano(hourly, objetivo) == 1
 
 
-def falso_pedir_prevision(latitud, longitud):
-    return payload_simulado()
+def test_payload():
+    datos = {
+        "hourly": {
+            "time": ["2026-09-04T05:00"],
+            "temperature_2m": [22.1],
+            "apparent_temperature": [21.8],
+            "precipitation": [0.2],
+            "precipitation_probability": [35],
+            "snowfall": [0.0],
+            "wind_speed_10m": [12.5],
+            "wind_gusts_10m": [20.0],
+            "relative_humidity_2m": [68],
+            "surface_pressure": [1012.3],
+            "cloud_cover": [55],
+            "visibility": [18000],
+        }
+    }
+    ahora = datetime(2026, 9, 3, 5, 0, tzinfo=timezone.utc)
+    objetivo = datetime(2026, 9, 4, 5, 0, tzinfo=timezone.utc)
 
-
-with patch.object(mod, "pedir_prevision", side_effect=falso_pedir_prevision):
-    mod.main()
-
-# Verificación
-conexion = mod.obtener_conexion()
-with conexion.cursor() as cur:
-    cur.execute("SELECT COUNT(*) AS n FROM bruto_lotes_ingesta WHERE fuente='open-meteo'")
-    print("Lotes de ingesta open-meteo:", cur.fetchone()["n"])
-    cur.execute("SELECT COUNT(*) AS n FROM bruto_respuestas_api WHERE fuente='open-meteo'")
-    print("Respuestas crudas guardadas:", cur.fetchone()["n"])
-    cur.execute(
-        """
-        SELECT e.nombre, c.prevista_para, c.horas_antelacion, c.temperatura_c,
-               c.lluvia_mm, c.probabilidad_lluvia_pct, c.origen_respuesta_id
-        FROM clima_previsiones c
-        JOIN nucleo_estadios e ON e.estadio_id = c.estadio_id
-        """
+    payload = construir_payload_guardado(
+        lote_id=7,
+        item={
+            "estadio_id": 1,
+            "partido_id": None,
+            "latitud": "43.264100",
+            "longitud": "-2.949800",
+        },
+        ahora_utc=ahora,
+        objetivo_utc=objetivo,
+        payload_texto='{"ok":true}',
+        datos=datos,
+        parametros={"latitude": 43.2641, "longitude": -2.9498},
     )
-    for fila in cur.fetchall():
-        print(fila)
-conexion.close()
+
+    assert payload["lote_id"] == 7
+    assert payload["estadio_id"] == 1
+    assert payload["horas_antelacion"] == 24
+    assert payload["temperatura_c"] == 22.1
+    assert payload["visibilidad_km"] == 18.0
+    assert payload["raw_payload"] == '{"ok":true}'
+
+
+if __name__ == "__main__":
+    test_punto_cercano()
+    test_payload()
+    print("Tests locales OK.")
