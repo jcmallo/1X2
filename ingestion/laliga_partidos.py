@@ -50,6 +50,7 @@ HEADERS = {
 DIVISIONES = {
     "primera": {
         "slug": "laliga-easports",
+        "match_slug": "laliga-ea-sports",
         "nombre": "LaLiga",
         "marca": "LALIGA EA SPORTS",
         "nivel": "PRIMERA_CATEGORIA",
@@ -61,6 +62,7 @@ DIVISIONES = {
     },
     "segunda": {
         "slug": "laliga-hypermotion",
+        "match_slug": "laliga-hypermotion",
         "nombre": "Segunda División",
         "marca": "LALIGA HYPERMOTION",
         "nivel": "SEGUNDA_CATEGORIA",
@@ -210,7 +212,7 @@ def descubrir_partidos(html: str, cfg: dict) -> list[str]:
     soup = BeautifulSoup(html, "html.parser")
     encontrados = {}
 
-    prefijo = f"temporada-2026-2027-{cfg['slug']}-"
+    prefijo = f"temporada-2026-2027-{cfg['match_slug']}-"
 
     for a in soup.find_all("a", href=True):
         href = str(a["href"]).strip()
