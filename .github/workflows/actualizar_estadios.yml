@@ -3,11 +3,6 @@ name: Actualizar coordenadas estadios
 on:
   workflow_dispatch:
 
-  # Los estadios cambian poco, pero si aparece uno nuevo queremos
-  # geocodificarlo antes de que el proceso de clima lo necesite.
-  schedule:
-    - cron: "7 4 * * *"
-
 concurrency:
   group: coordenadas-estadios
   cancel-in-progress: false
