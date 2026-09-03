@@ -1,6 +1,6 @@
 # Quiniela 1X2 - Sistema de Ingesta de Datos
 
-Ingestión automatizada de datos para predicción de resultados de la Quiniela 1X2. Recopila datos históricos y actuales de ligas españolas, competiciones complementarias, clima y estadios.
+Ingestión automatizada de datos para predicción de resultados de la Quiniela 1X2. Recopila datos históricos y actuales de ligas españolas, competiciones complementarias, clima y estadios
 
 ## Arquitectura
 
