@@ -377,7 +377,7 @@ def main() -> None:
         print(f"TOTAL relevantes: {len(partidos)}")
         return
     lote = api.iniciar_lote(
-        fuente="openfootball", tipo_fuente="calendario_complementario",
+        fuente="openfootball", tipo_fuente="cal_extra",
         notas=f"Competiciones masculinas v2 {args.temporada}; seleccion={args.competicion}; sin Transfermarkt",
     )
     print("Lote abierto:", lote)
