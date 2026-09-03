@@ -89,7 +89,22 @@ HORARIOS_FALLBACK: dict[tuple[str, str, int], dict[tuple[str, str], str]] = {
         ("real oviedo", "sevilla fc"): "18:30",
         ("deportivo alaves", "ca osasuna"): "21:00",
         ("girona fc", "villarreal cf"): "21:00",
-    }
+    },
+    # La página de resultados de Segunda J37 2025-26 también conserva
+    # fecha/resultado pero muestra "-- : --" en los 11 horarios.
+    ("2025-26", "segunda", 37): {
+        ("albacete bp", "sd eibar"): "20:30",
+        ("burgos cf", "rc deportivo"): "18:30",
+        ("malaga cf", "cd castellon"): "21:00",
+        ("real valladolid cf", "r sociedad b"): "16:15",
+        ("ad ceuta fc", "r racing club"): "21:00",
+        ("cordoba cf", "real sporting"): "14:00",
+        ("sd huesca", "real zaragoza"): "18:30",
+        ("cd mirandes", "cultural y deportiva leonesa"): "16:15",
+        ("granada cf", "ud almeria"): "16:15",
+        ("cd leganes", "fc andorra"): "18:30",
+        ("cadiz cf", "ud las palmas"): "20:30",
+    },
 }
 
 
