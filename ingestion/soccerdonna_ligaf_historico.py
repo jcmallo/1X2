@@ -80,6 +80,7 @@ CANONICOS = {
     "sd eibar": "SD Eibar Femenino",
     "sd eibar": "SD Eibar Femenino",
     "granada cf": "Granada CF Femenino",
+    "fc domont": "Granada CF Femenino",  # SoccerDonna usa este nombre erróneo para el club ID de Granada
     "rcd espanyol": "RCD Espanyol Femenino",
     "espanyol barcelona": "RCD Espanyol Femenino",
     "rcd espanyol barcelona": "RCD Espanyol Femenino",
