@@ -179,6 +179,36 @@ class ApiIngesta:
             )
         return data
 
+    def contexto_estadios(
+        self,
+        *,
+        solo_pendientes: bool = True,
+        limite: int = 100,
+    ) -> list[dict]:
+        data = self._request_json(
+            "GET",
+            "contexto_estadios.php",
+            params={
+                "solo_pendientes": "1" if solo_pendientes else "0",
+                "limite": max(1, min(200, int(limite))),
+            },
+            timeout=30,
+        )
+        items = data.get("items", [])
+        if not isinstance(items, list):
+            raise RuntimeError(
+                "La API devolvió 'items' de estadios con formato inválido."
+            )
+        return items
+
+    def guardar_estadio(self, payload: dict) -> dict:
+        return self._request_json(
+            "POST",
+            "guardar_estadio.php",
+            json=payload,
+            timeout=45,
+        )
+
     def iniciar_lote(
         self,
         fuente: str = "open-meteo",
