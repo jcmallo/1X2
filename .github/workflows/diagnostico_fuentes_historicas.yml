@@ -1,4 +1,4 @@
-name: Diagnóstico fuentes históricas
+name: Diagnóstico fuentes históricas v2
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ permissions:
 jobs:
   diagnostico:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
 
     steps:
       - name: Descargar repositorio
@@ -23,6 +23,6 @@ jobs:
       - name: Instalar dependencia
         run: python -m pip install requests
 
-      - name: Probar fuentes históricas 2022-23
+      - name: Probar mosaico histórico 2022-23
         working-directory: ingestion
         run: python diagnostico_fuentes_historicas.py
