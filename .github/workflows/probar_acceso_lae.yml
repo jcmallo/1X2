@@ -1,0 +1,84 @@
+name: Probar acceso a LAE
+
+# Diagnóstico de un solo uso: comprueba si desde GitHub Actions se pueden
+# leer los porcentajes oficiales de La Quiniela.
+#
+# LAE está detrás de Akamai, que identifica al cliente por su huella TLS
+# (JA3) antes de mirar cabeceras. Se comprobó que rechaza con 403 tanto a
+# curl como al servidor de IONOS, mientras que un Chrome real recibe 200.
+# curl_cffi replica el handshake de Chrome sin arrancar un navegador; este
+# workflow existe para saber si eso basta.
+#
+# Si basta, la captura de LAE puede vivir aquí como los demás ingestores.
+# Si no, habrá que capturarla desde un navegador real.
+#
+# No escribe nada: solo informa.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Instalar curl_cffi
+        run: pip install curl_cffi
+
+      - name: Intentar leer los porcentajes de LAE
+        run: |
+          python - <<'PY'
+          import sys
+
+          URL = ("https://www.loteriasyapuestas.es/servicios/estadisticas"
+                 "?jornada=4&temporada=2026")
+
+          # Primero, la referencia: requests normal debería recibir 403.
+          import requests
+          try:
+              r = requests.get(URL, timeout=25, headers={
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/120.0.0.0 Safari/537.36"})
+              print(f"requests normal      HTTP {r.status_code}  {len(r.content)} bytes")
+          except Exception as e:
+              print(f"requests normal      error: {e}")
+
+          # Ahora con la huella TLS de Chrome.
+          from curl_cffi import requests as cr
+
+          exito = False
+          for imp in ["chrome124", "chrome120", "chrome116", "safari17_0"]:
+              try:
+                  r = cr.get(URL, impersonate=imp, timeout=25)
+                  marca = "  <-- FUNCIONA" if r.status_code == 200 else ""
+                  print(f"curl_cffi {imp:<12} HTTP {r.status_code}  "
+                        f"{len(r.content)} bytes{marca}")
+                  if r.status_code == 200:
+                      exito = True
+                      datos = r.json()
+                      partidos = [v for k, v in datos.items() if k.isdigit()]
+                      print()
+                      print(f"  fecha_actualizacion: {datos.get('fecha_actualizacion')}")
+                      print(f"  partidos recibidos:  {len(partidos)}")
+                      for p in partidos[:4]:
+                          print(f"    {p.get('orden'):>2}. "
+                                f"{p.get('valor1')}/{p.get('valorx')}/{p.get('valor2')}")
+                      break
+              except Exception as e:
+                  print(f"curl_cffi {imp:<12} error: {str(e)[:80]}")
+
+          print()
+          if exito:
+              print("VEREDICTO: la captura de LAE puede automatizarse aquí.")
+              print("No hace falta la extensión de Chrome.")
+          else:
+              print("VEREDICTO: Akamai también bloquea desde GitHub Actions.")
+              print("Hay que capturar desde un navegador real (extensión).")
+              sys.exit(1)
+          PY
