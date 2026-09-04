@@ -284,14 +284,32 @@ def primer_partido(horarios: list[tuple[str, str]], ahora: datetime) -> datetime
     return min(candidatos) if candidatos else None
 
 
+# Cómo nombra SELAE los ocho valores del Pleno. El sufijo indica el lado:
+# 'l' local, 'v' visitante. Comprobado sobre la respuesta real:
+#
+#   "14": {"orden":"15", "valor1":null, "valorx":null, "valor2":null,
+#          "valor0l":"10","valor1l":"54","valor2l":"31","valorml":"5",
+#          "valor0v":"19","valor1v":"52","valor2v":"23","valormv":"6"}
+#
+# Las ternas 1/X/2 llegan a null en esta posición, que es lo correcto: el
+# Pleno no se juega a 1/X/2 sino a goles.
+CLAVES_PLENO = {
+    "local": ("valor0l", "valor1l", "valor2l", "valorml"),
+    "visitante": ("valor0v", "valor1v", "valor2v", "valormv"),
+}
+
+
 def _extraer_pleno(datos: dict) -> dict | None:
     """
     Saca el Pleno al 15 de la respuesta de SELAE.
 
-    La estructura de esa posición no está documentada y puede variar, así que
-    se buscan cuatro valores numéricos por lado que sumen 100. Si no cuadran,
-    se devuelve None en lugar de guardar algo dudoso: el Pleno es la categoría
-    de premio más alta y un dato mal leído ahí sale caro.
+    Se leen las claves por nombre y no por posición. Una versión anterior las
+    ordenaba alfabéticamente y tomaba las cuatro primeras como locales, pero
+    ese orden intercala los dos lados (valor0l, valor0v, valor1l...), así que
+    mezclaba equipos. La suma lo detectó y descartó el dato.
+
+    Si algo no cuadra se devuelve None en lugar de guardar algo dudoso: el
+    Pleno es la categoría de premio más alta y un dato mal leído ahí sale caro.
     """
     for clave, valor in datos.items():
         if not clave.isdigit() or not isinstance(valor, dict):
@@ -299,31 +317,24 @@ def _extraer_pleno(datos: dict) -> dict | None:
         if str(valor.get("orden")) != "15":
             continue
 
-        numeros = []
-        for k in sorted(valor):
-            if k == "orden":
-                continue
+        lados = {}
+        for lado, claves in CLAVES_PLENO.items():
             try:
-                numeros.append(float(valor[k]))
-            except (TypeError, ValueError):
-                continue
-
-        if len(numeros) < 8:
-            return None
-
-        local, visitante = numeros[:4], numeros[4:8]
-        if abs(sum(local) - 100) > 2 or abs(sum(visitante) - 100) > 2:
-            return None
+                numeros = [float(valor[k]) for k in claves]
+            except (KeyError, TypeError, ValueError):
+                return None
+            # Los cuatro resultados son excluyentes y cubren todos los casos,
+            # así que tienen que sumar 100.
+            if abs(sum(numeros) - 100) > 2:
+                return None
+            lados[lado] = numeros
 
         return {
-            "lae_local": {
-                "p0": round(local[0] / 100, 6), "p1": round(local[1] / 100, 6),
-                "p2": round(local[2] / 100, 6), "pm": round(local[3] / 100, 6),
-            },
-            "lae_visitante": {
-                "p0": round(visitante[0] / 100, 6), "p1": round(visitante[1] / 100, 6),
-                "p2": round(visitante[2] / 100, 6), "pm": round(visitante[3] / 100, 6),
-            },
+            f"lae_{lado}": {
+                "p0": round(n[0] / 100, 6), "p1": round(n[1] / 100, 6),
+                "p2": round(n[2] / 100, 6), "pm": round(n[3] / 100, 6),
+            }
+            for lado, n in lados.items()
         }
     return None
 
