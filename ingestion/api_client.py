@@ -462,6 +462,49 @@ class ApiIngesta:
             timeout=120,
         )
 
+    def contexto_dashboard(
+        self,
+        *,
+        temporada: str | None = None,
+        numero_jornada: int | None = None,
+    ) -> dict:
+        """
+        Una jornada con todo lo necesario para decidir: casillas, lo que juega
+        el público, la probabilidad de mercado, el Pleno y la última propuesta.
+
+        Sin argumentos devuelve la jornada más reciente.
+        """
+        params: dict = {}
+        if temporada:
+            params["temporada"] = temporada
+        if numero_jornada is not None:
+            params["numero_jornada"] = int(numero_jornada)
+
+        return self._request_json(
+            "GET",
+            "contexto_dashboard.php",
+            params=params,
+            timeout=45,
+        )
+
+    def guardar_boleto(self, payload: dict) -> dict:
+        """
+        Guarda una propuesta de boleto.
+
+        Obligatorios: numero_jornada, etiqueta_temporada y selecciones
+        (posicion 1..15 y signos). La recomendación FIJO/DOBLE/TRIPLE la
+        deduce el endpoint de cuántos signos se marcan.
+
+        No sobrescribe: cada llamada añade una ejecución nueva, para poder
+        comparar después lo propuesto con lo que ocurrió.
+        """
+        return self._request_json(
+            "POST",
+            "guardar_boleto.php",
+            json=payload,
+            timeout=60,
+        )
+
     def finalizar_lote(
         self,
         lote_id: int,
