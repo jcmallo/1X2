@@ -1,3 +1,4 @@
 requests==2.32.5
 beautifulsoup4==4.13.5
 pyxlsb==1.0.10
+curl_cffi>=0.16
