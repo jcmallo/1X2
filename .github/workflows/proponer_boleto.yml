@@ -1,0 +1,83 @@
+name: Proponer boleto
+
+# Calcula la propuesta de la jornada y la guarda.
+#
+# Se lanza después de capturar los porcentajes de LAE, no antes: la propuesta
+# se basa en cuánto juega el público a cada signo, así que con datos viejos
+# sale una propuesta vieja.
+#
+# Cada ejecución añade una propuesta nueva sin borrar las anteriores. Interesa
+# conservarlas para poder comparar después lo que se recomendó con lo que
+# ocurrió, que es la única forma de saber si esto sirve para algo.
+
+on:
+  schedule:
+    # Viernes 09:30 UTC, media hora después de capturar LAE: propuesta
+    # preliminar, para ver la jornada con tiempo.
+    - cron: "30 9 * * 5"
+    # Sábado 10:30 UTC, después de la captura cercana al cierre. Esta es la
+    # buena: los porcentajes ya casi no se mueven.
+    - cron: "30 10 * * 6"
+  workflow_dispatch:
+    inputs:
+      temporada:
+        description: "Temporada (vacío = la más reciente en la base)"
+        required: false
+        type: string
+      jornada:
+        description: "Número de jornada (vacío = la más reciente)"
+        required: false
+        type: string
+      columnas:
+        description: "Tope de combinaciones: 8 = 3 dobles, 16 = 4, 32 = 5"
+        required: false
+        default: "8"
+        type: string
+      abrir_pleno:
+        description: "Categorías extra por lado en el Pleno (multiplica el coste)"
+        required: false
+        default: "0"
+        type: string
+      dry_run:
+        description: "Simular sin escribir en la base de datos"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  proponer:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v7
+
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Probar puente IONOS
+        working-directory: ingestion
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: python probar_api.py
+
+      # Sin working-directory: el script importa el paquete `optimizador`, así
+      # que tiene que ejecutarse desde la raíz del repositorio con -m.
+      - name: Calcular la propuesta
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: |
+          ARGS="--columnas ${{ inputs.columnas || '8' }}"
+          ARGS="$ARGS --abrir-pleno ${{ inputs.abrir_pleno || '0' }}"
+          if [ -n "${{ inputs.temporada }}" ]; then ARGS="$ARGS --temporada ${{ inputs.temporada }}"; fi
+          if [ -n "${{ inputs.jornada }}" ]; then ARGS="$ARGS --jornada ${{ inputs.jornada }}"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m optimizador.proponer $ARGS
