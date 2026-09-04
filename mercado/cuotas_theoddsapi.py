@@ -498,6 +498,14 @@ def main() -> int:
 
     # --- Captura por liga ------------------------------------------------
 
+    # Instante único de la ejecución. La franja temporal es una propiedad
+    # del partido, no de cada casa: si se calculara desde el last_update
+    # de cada bookmaker, un partido situado justo en un umbral (48 h, por
+    # ejemplo) quedaría clasificado en franjas distintas según qué casa lo
+    # mirase, y cada ejecución generaría filas nuevas sin que la cuota se
+    # haya movido.
+    ahora = datetime.now(timezone.utc)
+
     guardados = 0
     fallos = 0
     sin_emparejar: list[tuple[str, str, float]] = []
@@ -530,21 +538,19 @@ def main() -> int:
                 continue
 
             score = puntuacion[ev.evento_id]
+            franja = franja_temporal(partido.inicio, ahora)
 
             casas_ok = 0
-            franja_vista = ""
 
             for casa in ev.casas:
                 cuotas = extraer_1x2(casa, ev.local, ev.visitante)
                 if cuotas is None:
                     continue
 
-                # El instante de la captura es cuando la casa movió la cuota,
-                # no cuando nosotros preguntamos. Así una reejecución sobre
-                # cuotas sin cambios actualiza en vez de duplicar.
+                # capturado_en registra cuándo el proveedor tenía este
+                # precio. Es informativo: quien decide si hay fila nueva es la
+                # comparación de cuotas que hace guardar_cuota.php.
                 momento = cuotas["actualizado_en"]
-                franja = franja_temporal(partido.inicio, momento)
-                franja_vista = franja
 
                 payload = {
                     "partido_id": partido.partido_id,
@@ -575,7 +581,7 @@ def main() -> int:
             marca = "~" if args.dry_run else "+"
             print(
                 f"  {marca} [{score:.2f}] {partido.local} vs {partido.visitante}"
-                f"  ({franja_vista}, {casas_ok} casas)"
+                f"  ({franja}, {casas_ok} casas)"
             )
 
         sin_emparejar.extend(
