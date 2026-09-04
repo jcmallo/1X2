@@ -445,6 +445,23 @@ class ApiIngesta:
             timeout=90,
         )
 
+    def importar_jornada_historica(self, payload: dict) -> dict:
+        """
+        Importa una jornada histórica completa de La Quiniela.
+
+        Escribe jornada, casillas, probabilidades y escrutinio en una sola
+        transacción. Se hace por jornada y no por casilla porque el histórico
+        son 1.010 jornadas x 15 casillas x 2 fuentes.
+
+        Idempotente: reimportar actualiza en lugar de duplicar.
+        """
+        return self._request_json(
+            "POST",
+            "importar_jornada_historica.php",
+            json=payload,
+            timeout=120,
+        )
+
     def finalizar_lote(
         self,
         lote_id: int,
