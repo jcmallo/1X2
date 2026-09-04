@@ -340,6 +340,111 @@ class ApiIngesta:
             timeout=120,
         )
 
+    def contexto_cuotas(
+        self,
+        *,
+        competicion_id: int | None = None,
+        temporada: str | None = None,
+        genero: str | None = None,
+        solo_quiniela: bool = False,
+        dias_futuro: int = 10,
+        retro_horas: int = 0,
+        solo_sin_cuotas: bool = True,
+        limite: int = 200,
+    ) -> list[dict]:
+        """Partidos candidatos a captura de cuotas."""
+        params: dict = {
+            "dias_futuro": max(1, min(30, int(dias_futuro))),
+            "retro_horas": max(0, min(168, int(retro_horas))),
+            "solo_sin_cuotas": "1" if solo_sin_cuotas else "0",
+            "solo_quiniela": "1" if solo_quiniela else "0",
+            "limite": max(1, min(500, int(limite))),
+        }
+        if competicion_id is not None:
+            params["competicion_id"] = int(competicion_id)
+        if temporada:
+            params["temporada"] = temporada
+        if genero:
+            params["genero"] = genero.upper()
+
+        data = self._request_json(
+            "GET",
+            "contexto_cuotas.php",
+            params=params,
+            timeout=45,
+        )
+        items = data.get("items", [])
+        if not isinstance(items, list):
+            raise RuntimeError(
+                "La API devolvió 'items' de cuotas con formato inválido."
+            )
+        return items
+
+    def guardar_cuota(self, payload: dict) -> dict:
+        """
+        Guarda una captura de cuotas 1X2.
+
+        Obligatorios: partido_id, casa_apuestas, capturado_en, fuente,
+        y además las tres cuotas o las tres probabilidades.
+
+        Idempotente por (partido_id, casa_apuestas, mercado, capturado_en).
+        """
+        return self._request_json(
+            "POST",
+            "guardar_cuota.php",
+            json=payload,
+            timeout=45,
+        )
+
+    def contexto_quiniela(
+        self,
+        *,
+        temporada: str | None = None,
+        numero_jornada: int | None = None,
+        solo_pendientes: bool = False,
+        limite: int = 5,
+    ) -> list[dict]:
+        """Jornadas de La Quiniela con sus 15 casillas."""
+        params: dict = {
+            "solo_pendientes": "1" if solo_pendientes else "0",
+            "limite": max(1, min(50, int(limite))),
+        }
+        if temporada:
+            params["temporada"] = temporada
+        if numero_jornada is not None:
+            params["numero_jornada"] = int(numero_jornada)
+
+        data = self._request_json(
+            "GET",
+            "contexto_quiniela.php",
+            params=params,
+            timeout=45,
+        )
+        jornadas = data.get("jornadas", [])
+        if not isinstance(jornadas, list):
+            raise RuntimeError(
+                "La API devolvió 'jornadas' con formato inválido."
+            )
+        return jornadas
+
+    def guardar_jornada_quiniela(self, payload: dict) -> dict:
+        """
+        Guarda una jornada de quiniela con sus casillas.
+
+        Obligatorios: numero_jornada, etiqueta_temporada, fecha_sorteo,
+        casillas (posicion 1..15, equipo_local_impreso,
+        equipo_visitante_impreso).
+
+        Transaccional e idempotente. Un signo ya guardado no se borra
+        enviando NULL.
+        """
+        return self._request_json(
+            "POST",
+            "guardar_jornada_quiniela.php",
+            json=payload,
+            timeout=90,
+        )
+
     def finalizar_lote(
         self,
         lote_id: int,
