@@ -64,7 +64,14 @@ except ImportError as exc:
 
 
 
-URL_BOLETO = "https://juegos.loteriasyapuestas.es/jugar/la-quiniela/apuesta"
+# El boleto se lee de eduardolosilla.es y no de SELAE: la página de juego de
+# SELAE está geobloqueada y devuelve 403 desde fuera de España, que es donde
+# corren los runners de GitHub Actions. Esta no lo está y sirve los nombres
+# ya en el HTML, sin necesidad de JavaScript.
+import requests as requests_normal
+
+
+URL_BOLETO = "https://www.eduardolosilla.es/quiniela"
 URL_ESTADISTICAS = "https://www.loteriasyapuestas.es/servicios/estadisticas"
 
 # Orden de preferencia; si Akamai endurece el filtro, alguno seguirá pasando.
@@ -102,73 +109,67 @@ def franja_temporal(cierre: datetime | None, ahora: datetime) -> str:
 
 def leer_boleto() -> dict:
     """
-    Nombres de los 15 partidos, número de jornada y cierre de ventas.
+    Nombres de los 15 partidos y número de jornada.
 
-    Se pide con curl_cffi igual que el endpoint de porcentajes. Desde una
-    petición normal fuera de España, SELAE redirige a
-    /es/geo/informacion-geobloqueo y devuelve 403: la página de juego está
-    geobloqueada, aunque el endpoint de datos no lo esté.
+    Se leen de eduardolosilla.es, que los sirve en el HTML sin JavaScript y
+    sin geobloqueo. Los porcentajes de esa misma página NO se usan: los pinta
+    Angular después de cargar, así que no están en el HTML, y además los
+    oficiales se obtienen directamente de SELAE.
+
+    Formato en la página: una tabla donde cada fila es
+
+        1  ATH.CLUB - AT.MADRID   SAB 16:15
+
+    y la casilla 15 (el Pleno) trae los dos equipos por separado.
     """
-    ultimo = None
-    html = None
-
-    for huella in HUELLAS:
-        try:
-            r = cr.get(URL_BOLETO, impersonate=huella, timeout=30)
-            if r.status_code == 200 and "geobloqueo" not in r.url:
-                html = r.text
-                break
-            ultimo = (
-                f"{huella}: HTTP {r.status_code}"
-                + (" (geobloqueo)" if "geobloqueo" in r.url else "")
-            )
-        except Exception as exc:  # noqa: BLE001
-            ultimo = f"{huella}: {exc}"
-
-    if html is None:
-        raise RuntimeError(
-            "No se pudo leer el boleto de SELAE. "
-            f"Último intento: {ultimo}. "
-            "Si aparece 'geobloqueo', la página de juego solo es accesible "
-            "desde España y hará falta otra vía para los nombres."
-        )
-
-    partidos = re.findall(
-        r'numero-partido-completos"?>\s*(\d+)\.\s*</strong>\s*'
-        r'<span class="nombre-partido-completo">\s*(.*?)\s*</span>',
-        html,
-        re.S,
+    r = requests_normal.get(
+        URL_BOLETO, headers={"User-Agent": UA_NAVEGADOR}, timeout=30
     )
+    r.raise_for_status()
+    html = r.text
+
+    texto = re.sub(r"<script.*?</script>", " ", html, flags=re.S | re.I)
+    texto = re.sub(r"<style.*?</style>", " ", texto, flags=re.S | re.I)
+    texto = re.sub(r"<[^>]+>", "\n", texto)
+    lineas = [" ".join(x.split()) for x in texto.split("\n")]
+    lineas = [x for x in lineas if x]
+
     nombres = {}
-    for numero, texto in partidos:
-        limpio = " ".join(texto.split())
-        partes = re.split(r"\s+-\s+", limpio, maxsplit=1)
-        if len(partes) == 2:
-            nombres[int(numero)] = (partes[0].strip(), partes[1].strip())
+    for i, linea in enumerate(lineas):
+        # Las filas del boleto son "N" seguido del enfrentamiento, o bien
+        # "N NOMBRE - NOMBRE" en la misma línea.
+        m = re.match(r"^(\d{1,2})\s+(.+?\s+-\s+.+)$", linea)
+        if m:
+            pos = int(m.group(1))
+            partes = re.split(r"\s+-\s+", m.group(2), maxsplit=1)
+            if 1 <= pos <= 15 and len(partes) == 2:
+                nombres.setdefault(pos, (partes[0].strip(), partes[1].strip()))
+            continue
 
-    texto_plano = re.sub(r"<[^>]+>", " ", html)
-    texto_plano = " ".join(texto_plano.split())
+        if re.fullmatch(r"\d{1,2}", linea):
+            pos = int(linea)
+            if not (1 <= pos <= 15) or pos in nombres:
+                continue
+            siguiente = lineas[i + 1] if i + 1 < len(lineas) else ""
+            partes = re.split(r"\s+-\s+", siguiente, maxsplit=1)
+            if len(partes) == 2:
+                nombres[pos] = (partes[0].strip(), partes[1].strip())
+            elif i + 2 < len(lineas) and re.match(r"^[A-ZÁÉÍÓÚÑ]", siguiente):
+                # El Pleno al 15 lista los equipos en líneas separadas.
+                nombres[pos] = (siguiente.strip(), lineas[i + 2].strip())
 
-    m_jornada = re.search(r"Jornada\s*(\d+)", texto_plano)
-    m_cierre = re.search(
-        r"Cierre de ventas:\s*(\d{2}/\d{2}/\d{4})\s*-?\s*(\d{1,2})[:.](\d{2})",
-        texto_plano,
-    )
+    m_jornada = re.search(r"JORNADA\s*(\d+)", html, re.I)
 
-    cierre = None
-    if m_cierre:
-        try:
-            cierre = datetime.strptime(
-                f"{m_cierre.group(1)} {m_cierre.group(2)}:{m_cierre.group(3)}",
-                "%d/%m/%Y %H:%M",
-            ).replace(tzinfo=timezone.utc)
-        except ValueError:
-            cierre = None
+    if len(nombres) < 14:
+        raise RuntimeError(
+            f"Solo se leyeron {len(nombres)} partidos del boleto en "
+            f"{URL_BOLETO}. ¿Ha cambiado la estructura de la página?"
+        )
 
     return {
         "nombres": nombres,
         "jornada": int(m_jornada.group(1)) if m_jornada else None,
-        "cierre": cierre,
+        "cierre": None,  # esta fuente no publica el cierre de ventas
     }
 
 
