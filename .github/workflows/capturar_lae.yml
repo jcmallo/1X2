@@ -1,0 +1,62 @@
+name: Capturar porcentajes de LAE
+
+# Los porcentajes apostados de La Quiniela, directamente de SELAE.
+#
+# Se captura varias veces por semana a propósito: los porcentajes cambian
+# mientras la gente apuesta, y cada snapshot se guarda con su franja temporal
+# (T-72, T-24, T-2, CIERRE). Al entrenar hay que usar el que estaba
+# disponible antes del partido, no el definitivo.
+#
+# La jornada suele cerrar el viernes o el sábado a mediodía.
+
+on:
+  schedule:
+    # miércoles, jueves y viernes a las 09:00 UTC
+    - cron: "0 9 * * 3,4,5"
+    # sábado a las 10:00 UTC, cerca del cierre
+    - cron: "0 10 * * 6"
+  workflow_dispatch:
+    inputs:
+      jornada:
+        description: "Forzar número de jornada (vacío = la que anuncie SELAE)"
+        required: false
+        type: string
+      dry_run:
+        description: "Simular sin escribir en la base de datos"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  capturar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v7
+
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Probar puente IONOS
+        working-directory: ingestion
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: python probar_api.py
+
+      - name: Capturar porcentajes
+        working-directory: mercado
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: |
+          python lae_porcentajes.py \
+            ${{ inputs.jornada && format('--jornada {0}', inputs.jornada) || '' }} \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
