@@ -196,9 +196,20 @@ def _explicar_simple(c: Casilla, signo: str, probabilidad_minima: float) -> str:
     fav = c.favorito()
 
     if signo != fav:
+        # El valor es probabilidad / popularidad: por encima de 1 el signo
+        # está infrajugado y paga más de lo que le toca; en 1 paga lo normal.
+        # Decir "paga mejor" con valor 1,00 sería falso, y este texto es lo
+        # que se lee al decidir si jugar el boleto.
+        if v >= 1.05:
+            reparto = f"este paga mejor (valor {v:.2f})"
+        else:
+            reparto = (
+                f"este no paga mejor (valor {v:.2f}), pero el favorito paga "
+                f"peor todavía ({c.valor(fav) or 0.0:.2f})"
+            )
         return (
             f"no es el favorito, pero el favorito está sobrejugado "
-            f"({c.p_lae[fav]:.0%} lo juega); este paga mejor (valor {v:.2f})"
+            f"({c.p_lae[fav]:.0%} lo juega); {reparto}"
         )
     if v >= 1.15:
         return f"favorito e infrajugado (valor {v:.2f})"
