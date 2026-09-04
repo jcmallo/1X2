@@ -163,50 +163,6 @@ class EventoOdds:
         self.visitante_norm = normalizar(self.visitante)
 
 
-def emparejar(
-    evento: EventoOdds,
-    candidatos: list[PartidoBD],
-) -> tuple[PartidoBD | None, float]:
-    """
-    Busca el partido de BD que corresponde a un evento de la API.
-
-    Filtra primero por ventana temporal (barato y muy discriminante) y
-    después puntúa por similitud de nombres. Devuelve el mejor candidato
-    y su puntuación, o (None, 0.0) si ninguno supera el umbral.
-    """
-    mejor: PartidoBD | None = None
-    mejor_score = 0.0
-    mejor_score_visto = 0.0  # incluye descartados, solo para diagnóstico
-
-    for p in candidatos:
-        delta = abs((p.inicio - evento.inicio).total_seconds()) / 3600
-        if delta > VENTANA_AMPLIA_HORAS:
-            continue
-
-        score_local = similitud(evento.local_norm, p.local_norm)
-        score_visit = similitud(evento.visitante_norm, p.visitante_norm)
-        score = (score_local + score_visit) / 2
-
-        mejor_score_visto = max(mejor_score_visto, score)
-
-        # Cuanto más lejos está la fecha, más exigente el parecido de nombres.
-        umbral = (
-            UMBRAL_SIMILITUD
-            if delta <= VENTANA_ESTRICTA_HORAS
-            else UMBRAL_SIMILITUD_LEJOS
-        )
-        if score < umbral:
-            continue
-
-        if score > mejor_score:
-            mejor_score = score
-            mejor = p
-
-    if mejor is None:
-        return None, mejor_score_visto
-    return mejor, mejor_score
-
-
 def franja_temporal(inicio: datetime, ahora: datetime) -> str:
     """Etiqueta la antelación de la captura respecto al inicio del partido."""
     horas = (inicio - ahora).total_seconds() / 3600
@@ -312,10 +268,15 @@ class OddsApi:
 
 def extraer_1x2(casa: dict, local: str, visitante: str) -> dict | None:
     """
-    Saca las tres cuotas del mercado h2h de una casa.
+    Saca las tres cuotas del mercado h2h de una casa, con su timestamp.
 
     En h2h de fútbol los outcomes son: nombre del local, nombre del
     visitante y 'Draw'. Si falta alguno, la fila no sirve.
+
+    Devuelve también 'actualizado_en': el momento en que ESA casa movió la
+    cuota, no el momento en que nosotros consultamos. Es lo que hace la
+    captura idempotente: dos ejecuciones seguidas sobre una cuota que no se
+    ha movido escriben la misma fila en lugar de duplicarla.
     """
     for mercado in casa.get("markets", []):
         if mercado.get("key") != "h2h":
@@ -335,10 +296,115 @@ def extraer_1x2(casa: dict, local: str, visitante: str) -> dict | None:
             elif nombre == visitante:
                 cuotas["visitante"] = float(precio)
 
-        if len(cuotas) == 3:
-            return cuotas
+        if len(cuotas) != 3:
+            continue
+
+        marca = casa.get("last_update") or mercado.get("last_update")
+        if not marca:
+            return None
+
+        try:
+            cuotas["actualizado_en"] = datetime.fromisoformat(
+                marca.replace("Z", "+00:00")
+            )
+        except ValueError:
+            return None
+
+        return cuotas
 
     return None
+
+
+def resolver_emparejamientos(
+    eventos: list[EventoOdds],
+    partidos: list[PartidoBD],
+) -> tuple[
+    dict[str, PartidoBD],
+    dict[str, float],
+    list[EventoOdds],
+    list[tuple[EventoOdds, float]],
+]:
+    """
+    Asigna como mucho un evento a cada partido, y viceversa.
+
+    The Odds API publica algunos partidos dos veces: una con el horario ya
+    confirmado y otra con uno provisional. Sin exclusión mutua, ambos
+    escriben sobre el mismo partido y el segundo pisa las cuotas del primero.
+
+    Se resuelve de forma voraz: se ordenan todas las parejas posibles por
+    calidad (primero mejor parecido de nombres, luego menor distancia
+    temporal) y se van asignando mientras ni el evento ni el partido estén
+    ya cogidos.
+    """
+    parejas = []
+    for ev in eventos:
+        for p in partidos:
+            delta = abs((p.inicio - ev.inicio).total_seconds()) / 3600
+            if delta > VENTANA_AMPLIA_HORAS:
+                continue
+
+            score = (
+                similitud(ev.local_norm, p.local_norm)
+                + similitud(ev.visitante_norm, p.visitante_norm)
+            ) / 2
+
+            umbral = (
+                UMBRAL_SIMILITUD
+                if delta <= VENTANA_ESTRICTA_HORAS
+                else UMBRAL_SIMILITUD_LEJOS
+            )
+            if score < umbral:
+                continue
+
+            parejas.append((score, -delta, ev, p))
+
+    # Mejor puntuación primero; a igualdad, la fecha más cercana.
+    parejas.sort(key=lambda t: (t[0], t[1]), reverse=True)
+
+    asignado: dict[str, PartidoBD] = {}
+    puntuacion: dict[str, float] = {}
+    partidos_cogidos: set[int] = set()
+
+    # Eventos que sí tenían al menos un candidato válido, aunque acaben
+    # sin asignar porque otro evento se quedó antes con ese partido.
+    tenian_candidato: set[str] = set()
+
+    for score, neg_delta, ev, p in parejas:
+        tenian_candidato.add(ev.evento_id)
+        if ev.evento_id in asignado:
+            continue
+        if p.partido_id in partidos_cogidos:
+            continue
+        asignado[ev.evento_id] = p
+        puntuacion[ev.evento_id] = score
+        partidos_cogidos.add(p.partido_id)
+
+    duplicados: list[EventoOdds] = []
+    sin_candidato: list[tuple[EventoOdds, float]] = []
+
+    for ev in eventos:
+        if ev.evento_id in asignado:
+            continue
+
+        if ev.evento_id in tenian_candidato:
+            # Tenía pareja válida, pero su partido ya estaba cogido: es el
+            # mismo encuentro publicado dos veces por la API.
+            duplicados.append(ev)
+            continue
+
+        mejor = max(
+            (
+                (
+                    similitud(ev.local_norm, p.local_norm)
+                    + similitud(ev.visitante_norm, p.visitante_norm)
+                ) / 2
+                for p in partidos
+            ),
+            default=0.0,
+        )
+        sin_candidato.append((ev, mejor))
+
+    return asignado, puntuacion, duplicados, sin_candidato
 
 
 # ---------------------------------------------------------------------------
@@ -432,10 +498,10 @@ def main() -> int:
 
     # --- Captura por liga ------------------------------------------------
 
-    ahora = datetime.now(timezone.utc)
     guardados = 0
     fallos = 0
     sin_emparejar: list[tuple[str, str, float]] = []
+    descartados_dup: list[tuple[str, str]] = []
 
     for sport_key, etiqueta in LIGAS_OBJETIVO.items():
         print(f"\n{etiqueta} ({sport_key})")
@@ -448,27 +514,45 @@ def main() -> int:
 
         print(f"  eventos devueltos: {len(eventos)}")
 
-        for ev in eventos:
-            partido, score = emparejar(ev, partidos)
+        asignado, puntuacion, duplicados, sin_candidato = (
+            resolver_emparejamientos(eventos, partidos)
+        )
 
+        if duplicados:
+            print(
+                f"  {len(duplicados)} evento(s) que la API publica por"
+                f" duplicado; se conserva el mejor de cada partido"
+            )
+
+        for ev in eventos:
+            partido = asignado.get(ev.evento_id)
             if partido is None:
-                sin_emparejar.append((ev.local, ev.visitante, score))
                 continue
 
-            franja = franja_temporal(partido.inicio, ahora)
-            capturado = ahora.strftime("%Y-%m-%d %H:%M:%S")
+            score = puntuacion[ev.evento_id]
 
             casas_ok = 0
+            franja_vista = ""
+
             for casa in ev.casas:
                 cuotas = extraer_1x2(casa, ev.local, ev.visitante)
                 if cuotas is None:
                     continue
 
+                # El instante de la captura es cuando la casa movió la cuota,
+                # no cuando nosotros preguntamos. Así una reejecución sobre
+                # cuotas sin cambios actualiza en vez de duplicar.
+                momento = cuotas["actualizado_en"]
+                franja = franja_temporal(partido.inicio, momento)
+                franja_vista = franja
+
                 payload = {
                     "partido_id": partido.partido_id,
                     "casa_apuestas": casa.get("key", "desconocida")[:80],
                     "mercado": "1X2",
-                    "capturado_en": capturado,
+                    "capturado_en": momento.astimezone(timezone.utc).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
                     "franja_temporal": franja,
                     "cuota_local": cuotas["local"],
                     "cuota_empate": cuotas["empate"],
@@ -491,8 +575,15 @@ def main() -> int:
             marca = "~" if args.dry_run else "+"
             print(
                 f"  {marca} [{score:.2f}] {partido.local} vs {partido.visitante}"
-                f"  ({franja}, {casas_ok} casas)"
+                f"  ({franja_vista}, {casas_ok} casas)"
             )
+
+        sin_emparejar.extend(
+            (ev.local, ev.visitante, score) for ev, score in sin_candidato
+        )
+        descartados_dup.extend(
+            (ev.local, ev.visitante) for ev in duplicados
+        )
 
     # --- Resumen ---------------------------------------------------------
 
@@ -504,14 +595,26 @@ def main() -> int:
         if fallos:
             print(f"Fallos al guardar: {fallos}")
 
-    if sin_emparejar:
-        print(f"\nEventos sin emparejar ({len(sin_emparejar)}):")
-        for local, visitante, score in sin_emparejar:
-            print(f"  [{score:.2f}] {local} vs {visitante}")
+    if descartados_dup:
         print(
-            "\n  Puntuación baja = el partido no está en la BD, está fuera de\n"
-            "  la ventana, o los nombres difieren demasiado. Revisar antes de\n"
-            "  bajar UMBRAL_SIMILITUD."
+            f"\nDuplicados de la API descartados ({len(descartados_dup)}):"
+        )
+        for local, visitante in descartados_dup:
+            print(f"  {local} vs {visitante}")
+        print(
+            "\n  La API publica algunos partidos dos veces, con horario\n"
+            "  confirmado y provisional. Se ha guardado una sola vez. Esto es\n"
+            "  normal y no requiere acción."
+        )
+
+    if sin_emparejar:
+        print(f"\nEventos sin partido en la BD ({len(sin_emparejar)}):")
+        for local, visitante, score in sin_emparejar:
+            print(f"  [mejor parecido: {score:.2f}] {local} vs {visitante}")
+        print(
+            "\n  El partido no está cargado, cae fuera de la ventana, o los\n"
+            "  nombres difieren demasiado. Si el parecido es alto, añadir el\n"
+            "  club a ALIAS_CLUBES antes que bajar UMBRAL_SIMILITUD."
         )
 
     print(f"\nCréditos consumidos en esta ejecución: {odds.creditos_usados}")
