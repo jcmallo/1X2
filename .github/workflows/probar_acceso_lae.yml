@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
 
       - name: Instalar curl_cffi
-        run: pip install curl_cffi
+        run: pip install curl_cffi requests
 
       - name: Intentar leer los porcentajes de LAE
         run: |
