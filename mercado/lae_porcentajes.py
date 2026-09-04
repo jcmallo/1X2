@@ -48,7 +48,7 @@ import argparse
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ingestion"))
 from api_client import ApiIngesta  # noqa: E402
@@ -158,6 +158,14 @@ def leer_boleto() -> dict:
                 # El Pleno al 15 lista los equipos en líneas separadas.
                 nombres[pos] = (siguiente.strip(), lineas[i + 2].strip())
 
+    # Horarios: tras cada partido vienen el día y la hora en líneas sueltas.
+    horarios = []
+    for i, linea in enumerate(lineas):
+        if re.fullmatch(r"(LUN|MAR|MIE|MIÉ|JUE|VIE|SAB|SÁB|DOM)", linea, re.I):
+            siguiente = lineas[i + 1] if i + 1 < len(lineas) else ""
+            if re.fullmatch(r"\d{1,2}:\d{2}", siguiente):
+                horarios.append((linea, siguiente))
+
     m_jornada = re.search(r"JORNADA\s*(\d+)", html, re.I)
 
     if len(nombres) < 14:
@@ -169,17 +177,18 @@ def leer_boleto() -> dict:
     return {
         "nombres": nombres,
         "jornada": int(m_jornada.group(1)) if m_jornada else None,
-        "cierre": None,  # esta fuente no publica el cierre de ventas
+        "horarios": horarios,
+        "cierre": None,  # esta fuente no publica la hora exacta de cierre
     }
 
 
-def leer_porcentajes(jornada: int, temporada: int) -> tuple[dict, str]:
+def leer_porcentajes(jornada: int, temporada: int) -> tuple[dict, dict | None, str]:
     """
-    Porcentajes apostados por posición. Devuelve también qué huella funcionó.
+    Porcentajes apostados. Devuelve las ternas, el Pleno y la huella usada.
 
-    La respuesta viene indexada por posición como cadena ("0", "1", ...) y
-    cada entrada trae 'orden', 'valor1', 'valorx', 'valor2'. La posición 15
-    (el Pleno) tiene otro formato y se descarta aquí: se trata aparte.
+    La respuesta viene indexada por posición y cada entrada trae 'orden',
+    'valor1', 'valorx', 'valor2'. La posición 15 es el Pleno y llega con más
+    campos, uno por cada resultado de goles de cada equipo.
     """
     ultimo_error = None
 
@@ -197,6 +206,7 @@ def leer_porcentajes(jornada: int, temporada: int) -> tuple[dict, str]:
 
             datos = r.json()
             salida = {}
+            pleno = None
             for clave, valor in datos.items():
                 if not clave.isdigit() or not isinstance(valor, dict):
                     continue
@@ -218,8 +228,11 @@ def leer_porcentajes(jornada: int, temporada: int) -> tuple[dict, str]:
                     continue
                 salida[pos] = terna
 
+            # El Pleno viene en la posición 15 con los goles de cada equipo.
+            pleno = _extraer_pleno(datos)
+
             if salida:
-                return salida, huella
+                return salida, pleno, huella
             ultimo_error = f"respuesta sin ternas válidas con {huella}"
 
         except Exception as exc:  # noqa: BLE001
@@ -228,6 +241,91 @@ def leer_porcentajes(jornada: int, temporada: int) -> tuple[dict, str]:
     raise RuntimeError(
         f"No se pudieron leer los porcentajes de SELAE. Último intento: {ultimo_error}"
     )
+
+
+DIAS_SEMANA = {
+    "LUN": 0, "MAR": 1, "MIE": 2, "MIÉ": 2,
+    "JUE": 3, "VIE": 4, "SAB": 5, "SÁB": 5, "DOM": 6,
+}
+
+
+def primer_partido(horarios: list[tuple[str, str]], ahora: datetime) -> datetime | None:
+    """
+    Momento del primer partido de la jornada, a partir de sus horarios.
+
+    El boleto trae el día de la semana y la hora ("SAB", "14:00") pero no la
+    fecha. Se resuelve buscando la próxima ocurrencia de ese día a partir de
+    hoy, que para una jornada en curso es siempre la correcta.
+
+    Sirve como cota superior del cierre de ventas: la quiniela siempre cierra
+    antes de que empiece el primer partido. No es la hora exacta de cierre,
+    pero basta para clasificar la captura en su franja sin inventar un dato.
+    """
+    candidatos = []
+
+    for dia, hora in horarios:
+        indice = DIAS_SEMANA.get(dia.upper())
+        if indice is None:
+            continue
+        try:
+            hh, mm = (int(x) for x in hora.split(":"))
+        except ValueError:
+            continue
+
+        adelanto = (indice - ahora.weekday()) % 7
+        fecha = (ahora + timedelta(days=adelanto)).replace(
+            hour=hh, minute=mm, second=0, microsecond=0
+        )
+        # Si ese día es hoy pero la hora ya pasó, es el de la semana que viene.
+        if fecha < ahora:
+            fecha += timedelta(days=7)
+        candidatos.append(fecha)
+
+    return min(candidatos) if candidatos else None
+
+
+def _extraer_pleno(datos: dict) -> dict | None:
+    """
+    Saca el Pleno al 15 de la respuesta de SELAE.
+
+    La estructura de esa posición no está documentada y puede variar, así que
+    se buscan cuatro valores numéricos por lado que sumen 100. Si no cuadran,
+    se devuelve None en lugar de guardar algo dudoso: el Pleno es la categoría
+    de premio más alta y un dato mal leído ahí sale caro.
+    """
+    for clave, valor in datos.items():
+        if not clave.isdigit() or not isinstance(valor, dict):
+            continue
+        if str(valor.get("orden")) != "15":
+            continue
+
+        numeros = []
+        for k in sorted(valor):
+            if k == "orden":
+                continue
+            try:
+                numeros.append(float(valor[k]))
+            except (TypeError, ValueError):
+                continue
+
+        if len(numeros) < 8:
+            return None
+
+        local, visitante = numeros[:4], numeros[4:8]
+        if abs(sum(local) - 100) > 2 or abs(sum(visitante) - 100) > 2:
+            return None
+
+        return {
+            "lae_local": {
+                "p0": round(local[0] / 100, 6), "p1": round(local[1] / 100, 6),
+                "p2": round(local[2] / 100, 6), "pm": round(local[3] / 100, 6),
+            },
+            "lae_visitante": {
+                "p0": round(visitante[0] / 100, 6), "p1": round(visitante[1] / 100, 6),
+                "p2": round(visitante[2] / 100, 6), "pm": round(visitante[3] / 100, 6),
+            },
+        }
+    return None
 
 
 def temporada_actual(hoy: datetime | None = None) -> str:
@@ -257,23 +355,36 @@ def main() -> int:
         return 1
 
     ahora = datetime.now(timezone.utc)
-    franja = franja_temporal(boleto["cierre"], ahora)
+
+    # El cierre no viene con el boleto: se aproxima con el primer partido de
+    # la jornada, que ya está en nuestra base de datos.
+    cierre = boleto["cierre"] or primer_partido(boleto.get("horarios", []), ahora)
+    franja = franja_temporal(cierre, ahora)
     temporada = temporada_actual(ahora)
     anio_api = int(temporada.split("-")[0])
 
     print(f"  jornada {jornada} · temporada {temporada}")
-    print(f"  cierre: {boleto['cierre']}  ->  franja {franja}")
+    origen_cierre = "SELAE" if boleto["cierre"] else "primer partido"
+    print(f"  cierre ({origen_cierre}): {cierre}  ->  franja {franja}")
     print(f"  partidos: {len(boleto['nombres'])}")
 
     print("\nLeyendo porcentajes de SELAE...")
-    porcentajes, huella = leer_porcentajes(jornada, anio_api)
+    porcentajes, pleno, huella = leer_porcentajes(jornada, anio_api)
     print(f"  huella que funcionó: {huella}")
     print(f"  posiciones con datos: {len(porcentajes)}")
+    print(f"  Pleno al 15: {'leído' if pleno else 'no disponible'}")
 
     casillas = []
     for pos in sorted(boleto["nombres"]):
         if pos > 14:
-            continue  # el Pleno al 15 tiene formato propio
+            # La casilla 15 entra sin terna 1X2: sus porcentajes son de goles
+            # y van aparte, en quiniela_pleno15.
+            casillas.append({
+                "posicion": pos,
+                "equipo_local_impreso": boleto["nombres"][pos][0][:100],
+                "equipo_visitante_impreso": boleto["nombres"][pos][1][:100],
+            })
+            continue
         local, visitante = boleto["nombres"][pos]
         casilla = {
             "posicion": pos,
@@ -290,7 +401,7 @@ def main() -> int:
         casillas.append(casilla)
 
     con_datos = sum(1 for c in casillas if "prob_lae" in c)
-    print(f"  casillas con porcentaje: {con_datos}/{len(casillas)}")
+    print(f"  casillas con porcentaje: {con_datos}/14  (+ la 15 sin terna)")
 
     print()
     for c in casillas:
@@ -319,8 +430,13 @@ def main() -> int:
         "etiqueta_temporada": temporada,
         "fuente": "selae",
         "fuente_fichero": f"selae_estadisticas_{franja}",
+        # La franja distingue una captura previa del dato definitivo: no es lo
+        # mismo lo que juega la gente el jueves que al cierre.
+        "tipo_lae": franja if franja != "DESCONOCIDA" else "ESTIMADO",
         "casillas": casillas,
     }
+    if pleno:
+        payload["pleno15"] = pleno
     if boleto["cierre"]:
         payload["fecha_sorteo"] = boleto["cierre"].strftime("%Y-%m-%d")
 
