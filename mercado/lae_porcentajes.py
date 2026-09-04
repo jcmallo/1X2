@@ -55,11 +55,13 @@ from api_client import ApiIngesta  # noqa: E402
 
 try:
     from curl_cffi import requests as cr
-except ImportError:
-    print("Falta curl_cffi. Instalar con: pip install curl_cffi")
+except ImportError as exc:
+    print(f"No se pudo importar curl_cffi: {exc}")
+    print("Instalar con: pip install 'curl_cffi>=0.16'")
+    print("Hace falta para replicar la huella TLS de Chrome; sin ella")
+    print("Akamai rechaza la petición a SELAE con 403.")
     sys.exit(1)
 
-import requests as requests_normal
 
 
 URL_BOLETO = "https://juegos.loteriasyapuestas.es/jugar/la-quiniela/apuesta"
@@ -102,13 +104,34 @@ def leer_boleto() -> dict:
     """
     Nombres de los 15 partidos, número de jornada y cierre de ventas.
 
-    Esta página no está protegida: basta una petición normal.
+    Se pide con curl_cffi igual que el endpoint de porcentajes. Desde una
+    petición normal fuera de España, SELAE redirige a
+    /es/geo/informacion-geobloqueo y devuelve 403: la página de juego está
+    geobloqueada, aunque el endpoint de datos no lo esté.
     """
-    r = requests_normal.get(
-        URL_BOLETO, headers={"User-Agent": UA_NAVEGADOR}, timeout=30
-    )
-    r.raise_for_status()
-    html = r.text
+    ultimo = None
+    html = None
+
+    for huella in HUELLAS:
+        try:
+            r = cr.get(URL_BOLETO, impersonate=huella, timeout=30)
+            if r.status_code == 200 and "geobloqueo" not in r.url:
+                html = r.text
+                break
+            ultimo = (
+                f"{huella}: HTTP {r.status_code}"
+                + (" (geobloqueo)" if "geobloqueo" in r.url else "")
+            )
+        except Exception as exc:  # noqa: BLE001
+            ultimo = f"{huella}: {exc}"
+
+    if html is None:
+        raise RuntimeError(
+            "No se pudo leer el boleto de SELAE. "
+            f"Último intento: {ultimo}. "
+            "Si aparece 'geobloqueo', la página de juego solo es accesible "
+            "desde España y hará falta otra vía para los nombres."
+        )
 
     partidos = re.findall(
         r'numero-partido-completos"?>\s*(\d+)\.\s*</strong>\s*'
