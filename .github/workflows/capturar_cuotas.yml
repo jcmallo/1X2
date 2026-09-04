@@ -1,0 +1,55 @@
+name: Capturar cuotas de mercado
+
+# Coste en The Odds API: 2 créditos por ejecución (2 ligas x 1 mercado x 1 región).
+# Una ejecución diaria consume ~60 créditos/mes sobre un plan gratuito de 500.
+on:
+  schedule:
+    # 08:00 UTC = 10:00 en Madrid (verano) / 09:00 (invierno)
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      dias_futuro:
+        description: "Ventana de partidos a considerar (días)"
+        required: false
+        default: "14"
+        type: string
+      dry_run:
+        description: "Simular sin escribir en la base de datos"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  capturar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v7
+
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Probar puente IONOS
+        working-directory: ingestion
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: python probar_api.py
+
+      - name: Capturar cuotas
+        working-directory: mercado
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: |
+          python cuotas_theoddsapi.py \
+            --dias-futuro "${{ inputs.dias_futuro || '14' }}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
