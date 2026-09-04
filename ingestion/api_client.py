@@ -462,6 +462,46 @@ class ApiIngesta:
             timeout=120,
         )
 
+    def contexto_resultados(
+        self,
+        *,
+        limite: int = 500,
+        offset: int = 0,
+    ) -> dict:
+        """
+        Partidos con resultado, para entrenar modelos.
+
+        Devuelve el sobre completo (items, total, hay_mas) y no solo la
+        lista: quien entrena necesita paginar y saber cuándo parar.
+        """
+        return self._request_json(
+            "GET",
+            "contexto_resultados.php",
+            params={
+                "limite": max(1, min(1000, int(limite))),
+                "offset": max(0, int(offset)),
+            },
+            timeout=90,
+        )
+
+    def guardar_pronostico(self, payload: dict) -> dict:
+        """
+        Guarda el pronóstico propio de una jornada como MODELO_PROPIO.
+
+        Obligatorios: numero_jornada, etiqueta_temporada y casillas
+        (posicion 1..14, con p1/px/p2 en fracciones que sumen 1).
+
+        Va en un endpoint aparte del importador histórico porque aquel fija
+        la fuente al mercado o a LAE, y mezclarlos impediría comparar
+        después el modelo con ellos.
+        """
+        return self._request_json(
+            "POST",
+            "guardar_pronostico.php",
+            json=payload,
+            timeout=60,
+        )
+
     def contexto_dashboard(
         self,
         *,
