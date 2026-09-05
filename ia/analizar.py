@@ -232,6 +232,27 @@ Por cada ajuste propuesto, comprueba:
   - ¿Hay fuentes que lo contradigan?
   - ¿El razonamiento se sostiene, o encadena suposiciones?
 
+LOS TRES VEREDICTOS NO SON UNA ESCALA DE SEVERIDAD
+
+Son tres cosas distintas, y confundirlas deja pasar ajustes que no deberían:
+
+  descartar   la premisa es FALSA. La noticia dice lo contrario de lo que el
+              análisis entendió, la fecha no es la que cree, el jugador no
+              existe, el precio ya se había movido. Un hecho mal leído no se
+              rebaja: se tira. Da igual que la conclusión pudiera ser
+              correcta por casualidad.
+
+  rebajar     la premisa es CIERTA pero la evidencia es floja: una sola
+              fuente de nivel C, una inferencia larga, un efecto real pero
+              probablemente pequeño.
+
+  mantener    el ajuste se sostiene.
+
+Si al escribir tu resumen usas palabras como "malinterpretado", "no es lo
+que dice la fuente", "de hace meses" o "inexistente", el veredicto de ese
+ajuste es "descartar". No "rebajar". Comprueba que tus veredictos dicen lo
+mismo que tu resumen: es el error más fácil de cometer aquí.
+
 No busques equilibrio ni des el visto bueno por cortesía. Si un ajuste está
 bien fundado, dilo en una línea y sigue. Tu utilidad está en los que no lo
 están.
@@ -597,11 +618,31 @@ def aplicar_veredictos(ajustes: dict, veredictos: dict) -> dict:
     if not v:
         return ajustes
 
+    # Si el crítico escribe que la premisa es falsa pero vota "rebajar", el
+    # ajuste sobrevive con confianza baja y acaba en el boleto igual. Pasó en
+    # la primera ejecución real: dijo que una noticia de catorce meses se
+    # había leído al revés, y aun así lo dejó pasar.
+    DELATORAS = (
+        "malinterpret", "al revés", "no es lo que dice", "inexistente",
+        "no existe", "hace meses", "de hace un año", "contradice",
+        "falso", "erróne", "confunde",
+    )
+
     orden = {"alta": "media", "media": "baja", "baja": "baja"}
     sobreviven = []
     for a in ajustes.get("ajustes") or []:
         pos = int(a.get("posicion", 0))
         veredicto = (v.get(pos) or {}).get("veredicto", "mantener")
+
+        motivo = ((v.get(pos) or {}).get("motivo", "")
+                  + " " + str(veredictos.get("resumen", ""))).lower()
+        if veredicto != "descartar" and any(d in motivo for d in DELATORAS):
+            print(
+                f"  casilla {pos}: el crítico votó '{veredicto}' pero su "
+                "motivo dice que la premisa es falsa. Se descarta."
+            )
+            veredicto = "descartar"
+
         if veredicto == "descartar":
             a["descartado_por_revision"] = (v[pos] or {}).get("motivo", "")
             ajustes.setdefault("descartados", []).append(a)

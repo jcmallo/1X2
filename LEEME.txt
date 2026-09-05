@@ -1,21 +1,28 @@
 Sustituye  ia/analizar.py
 
-QUÉ CAMBIA, DESPUÉS DE LA PRIMERA EJECUCIÓN REAL
+ANTES, EN phpMyAdmin:
 
-1. Presupuesto de búsqueda dicho en voz alta.
-   El modelo se quedó sin búsquedas y dejó cinco casillas sin mirar, entre
-   ellas las tres de Liga F —las de mayor discrepancia y menor cobertura de
-   prensa, o sea justo donde estaba el margen—. No sabía cuánto podía
-   gastar, así que gastó todo en las primeras.
-   Ahora se le dice: 16 búsquedas para N casillas, unas dos por casilla,
-   empezando por la de más discrepancia. Y que Liga F no se deja para el
-   final.
+    SHOW COLUMNS FROM ia_analisis_jornada LIKE 'senales';
 
-2. La lista de atención se corta en 6.
-   Marcó ocho y no le dio para tantas. Seis a fondo valen más que ocho a
-   medias.
+Si no devuelve nada (que es lo que explica el HTTP 500):
 
-3. El coste ya cuenta las búsquedas.
-   Se cobran aparte de los tokens que devuelven (0,01 $ cada una). Sin esa
-   línea, la cifra guardada era un 20% menor que la real — y esa cifra es
-   la que decidirá si esta capa compensa.
+    ALTER TABLE ia_analisis_jornada
+      ADD COLUMN senales MEDIUMTEXT DEFAULT NULL AFTER ajustes;
+
+QUÉ CAMBIA EN EL CÓDIGO
+
+El crítico distinguía mal entre "la evidencia es floja" y "el dato es
+falso". En la primera ejecución real escribió que una noticia de catorce
+meses se había leído al revés —el fichaje de un entrenador entendido como
+su destitución— y aun así votó "rebajar". El ajuste sobrevivió con
+confianza baja y habría entrado en el boleto.
+
+Ahora el prompt le dice que los tres veredictos no son una escala de
+severidad sino tres cosas distintas: descartar es para premisas falsas,
+rebajar para evidencia floja pero cierta. Y le pide que compruebe que sus
+veredictos dicen lo mismo que su resumen.
+
+Como eso depende de que haga caso, hay además una red de seguridad en el
+código: si el motivo contiene "malinterpretado", "inexistente", "al revés"
+o similares y el veredicto no es "descartar", se descarta igualmente y se
+avisa por pantalla.
