@@ -70,6 +70,13 @@ CLAVES_PLENO = {
 # rápida de que SELAE empiece a devolver 403.
 PAUSA = 0.4
 
+# El buscador de SELAE devuelve como mucho 115 sorteos por petición, y cuando
+# se pasa de ahí no avisa: entrega los 115 MÁS RECIENTES e ignora el resto del
+# rango. Pedir "de 2016 a hoy" devolvía solo 2025-2026. Por eso el rango se
+# trocea en tramos de un año, que rondan los 70 sorteos y caben de sobra.
+TRAMO_DIAS = 365
+LIMITE_SELAE = 115
+
 
 def pedir(url: str, params: dict) -> object:
     """GET con huella de navegador, probando varias si alguna falla."""
@@ -272,18 +279,45 @@ def main() -> int:
 
     print(f"Buscando sorteos celebrados entre {inicio} y {fin}...")
 
-    sorteos = pedir(BUSCADOR, {
-        "game_id": "LAQU",
-        "celebrados": "true",
-        "fechaInicioInclusiva": inicio.strftime("%Y%m%d"),
-        "fechaFinInclusiva": fin.strftime("%Y%m%d"),
-    })
+    sorteos = []
+    vistos: set[str] = set()
+    tramo_ini = inicio
 
-    if not isinstance(sorteos, list) or not sorteos:
+    while tramo_ini <= fin:
+        tramo_fin = min(tramo_ini + timedelta(days=TRAMO_DIAS - 1), fin)
+
+        lote = pedir(BUSCADOR, {
+            "game_id": "LAQU",
+            "celebrados": "true",
+            "fechaInicioInclusiva": tramo_ini.strftime("%Y%m%d"),
+            "fechaFinInclusiva": tramo_fin.strftime("%Y%m%d"),
+        })
+        lote = lote if isinstance(lote, list) else []
+
+        if len(lote) >= LIMITE_SELAE:
+            print(
+                f"  AVISO {tramo_ini}..{tramo_fin}: {len(lote)} sorteos, en el "
+                f"tope de SELAE. Puede faltar alguno; reduce TRAMO_DIAS."
+            )
+
+        nuevos = 0
+        for s_ in lote:
+            clave = str(s_.get("id_sorteo") or s_.get("fecha_sorteo"))
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            sorteos.append(s_)
+            nuevos += 1
+
+        print(f"  {tramo_ini} .. {tramo_fin}: {nuevos} sorteos")
+        tramo_ini = tramo_fin + timedelta(days=1)
+        time.sleep(PAUSA)
+
+    if not sorteos:
         print("SELAE no ha devuelto ningún sorteo en ese rango.")
         return 1
 
-    print(f"  {len(sorteos)} sorteos")
+    print(f"\n  {len(sorteos)} sorteos en total")
     if len(sorteos) > 60:
         minutos = len(sorteos) * (PAUSA + 1.6) / 60
         print(
