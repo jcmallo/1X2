@@ -1,0 +1,40 @@
+ANTES DE LANZARLO
+=================
+
+1. Ejecutar 03_tabla_analisis_ia.sql en phpMyAdmin (va en el IONOS.zip).
+2. Subir guardar_analisis_ia.php a api/ingesta/.
+3. Añadir el secreto ANTHROPIC_API_KEY en GitHub
+   (Settings → Secrets and variables → Actions).
+4. Lanzar "Analizar jornada con IA" con dry_run MARCADO la primera vez.
+
+
+SOBRE LAS FUENTES
+=================
+
+No hace falta darle enlaces de periódicos. Comprobado: buscando
+"Getafe Celta lesionados alineación probable" encuentra el parte médico
+completo de los dos equipos y hasta el sistema que va a usar el entrenador.
+
+Y las fuentes que encuentra sola (FútbolFantasy, Analítica Fantasy, Comunio)
+son MEJORES para esto que Marca o AS: cubren alineaciones y lesiones a
+diario porque es su negocio.
+
+Listar periódicos concretos en el prompt estrecha la búsqueda hacia fuentes
+peores. Por eso el prompt le dice QUÉ buscar, no DÓNDE.
+
+
+LO QUE HAY QUE VIGILAR
+======================
+
+Esta capa NO está demostrada. Es una hipótesis: que leer la prensa mejore lo
+que dicen los números.
+
+Cada ajuste se guarda con su razón. Dentro de unos meses habrá que comparar
+sobre las mismas jornadas:
+
+    a) lo que acertó el cálculo estadístico solo
+    b) lo que habría acertado con los ajustes de la IA
+    c) lo que acertó el mercado
+
+Si (b) no supera a (a), se quita. Costar poco no es razón para mantener algo
+que no funciona.

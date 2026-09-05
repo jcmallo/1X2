@@ -484,6 +484,21 @@ class ApiIngesta:
             timeout=90,
         )
 
+    def guardar_analisis_ia(self, payload: dict) -> dict:
+        """
+        Guarda el análisis de la jornada hecho por Claude.
+
+        Se manda el texto entero, no un resumen: la utilidad de esta capa
+        depende de poder comprobar después si sus ajustes acertaron, y para
+        eso hace falta el razonamiento completo.
+        """
+        return self._request_json(
+            "POST",
+            "guardar_analisis_ia.php",
+            json=payload,
+            timeout=90,
+        )
+
     def guardar_pleno(self, payload: dict) -> dict:
         """
         Guarda una captura del Pleno al 15 (goles 0/1/2/M por lado).
