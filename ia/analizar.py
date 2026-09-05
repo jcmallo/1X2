@@ -58,122 +58,233 @@ import anthropic  # noqa: E402
 
 MODELO = "claude-opus-5"
 
+# Cuánta discrepancia entre mercado, público y modelo hace que un partido
+# merezca una búsqueda a fondo. Calibrado para que salgan entre tres y seis
+# de los catorce: menos deja fuera partidos interesantes, más diluye la
+# atención y hace que el modelo invente contexto donde no lo hay.
+UMBRAL_ATENCION = 0.35
+
 # Precios por millón de tokens, para poder registrar lo que cuesta cada
 # ejecución en lugar de estimarlo.
 PRECIO_ENTRADA = 5.00
 PRECIO_SALIDA = 25.00
 
 
-SISTEMA = """Analizas jornadas de La Quiniela española para un sistema que ya
-hace sus propios cálculos. Tu papel no es recalcular probabilidades: eso lo
-hace un modelo estadístico entrenado con 4.400 partidos, y lo hace mejor que
-tú. Tu papel es aportar lo que ese modelo no puede ver.
+SISTEMA = """Analizas jornadas de La Quiniela para un sistema que ya hace sus
+propios cálculos. NO recalculas probabilidades: eso lo hace un modelo
+estadístico entrenado con 4.402 partidos, y lo hace mejor que tú.
+
+Tu trabajo es convertir información humana en datos medibles.
+
+LA PREGUNTA QUE IMPORTA
+
+No es "¿es importante que este jugador no juegue?".
+
+Es "¿esta información YA está metida en la cuota?".
+
+Si un titular cae lesionado a las 11:08 y la cuota del local pasa del 47% al
+41% a las 12:00, el mercado ya lo ha descontado. Si tú lo "descubres" a las
+13:45 y vuelves a rebajar al local, estás contando dos veces lo mismo y
+empeorando la estimación.
+
+Por eso recibes el MOVIMIENTO de las cuotas por franja horaria, no solo su
+último valor. Úsalo. Antes de proponer nada, comprueba si el precio ya se
+movió en esa dirección.
 
 QUÉ TIENES DELANTE
 
-Por cada casilla del boleto recibes cuatro cosas:
+  % LAE        cuánta gente juega cada signo. Qué hace el público, no qué
+               va a pasar.
+  % Apuestas   probabilidad implícita en las cuotas, sin margen. Es el mejor
+               estimador público: hay dinero detrás.
+  % Predictor  el modelo propio: Elo, forma, goles, descanso, directos.
+  Valor        Apuestas ÷ LAE. Por encima de 1 el signo está infrajugado.
+  Movimiento   cómo han evolucionado cuotas y porcentajes por franja.
 
-  % LAE        cuánta gente juega cada signo. Dice qué hace el público, no
-               qué va a pasar.
-  % Apuestas   probabilidad implícita en las cuotas, ya sin margen. Es el
-               mejor estimador público que existe: hay dinero detrás.
-  % Predictor  el modelo propio. Combina Elo, forma de las últimas cinco
-               jornadas, goles recientes, descanso y enfrentamientos directos.
-  Valor        Apuestas ÷ LAE. Por encima de 1 el signo está infrajugado y
-               paga más de lo que le corresponde, porque el premio se reparte
-               entre acertantes.
+QUÉ DEVUELVES: SEÑALES, NO PORCENTAJES
 
-QUÉ SE ESPERA DE TI
+Prohibido decir "el Atlético baja al 41%". Eso es intuición disfrazada de
+número.
 
-Buscar en la prensa y razonar sobre lo que ninguno de esos números contiene:
+Lo que sirve es describir el HECHO con precisión y dejar que la estadística
+aprenda cuánto vale:
 
-  - Bajas, sanciones y lesiones de última hora, y sobre todo SI SON
-    TITULARES. Que falte el tercer portero no cambia nada; que falte el
-    delantero que mete la mitad de los goles, sí.
-  - Alineaciones probables y rotaciones. Un equipo con Champions o Europa
-    League entre semana no sale igual el domingo, y la prensa suele
-    adelantarlo el día antes.
-  - El clima de cada sede y a quién favorece. Un equipo de juego combinativo
-    y suelo seco jugando en el norte con lluvia y viento no es el mismo
-    equipo; un campo pesado iguala mucho.
-  - Situación deportiva y ambiente: pelea por el descenso o el ascenso, un
-    entrenador a punto de caer, un equipo ya clasificado que no se juega
-    nada, crisis de vestuario, cambio de entrenador reciente.
-  - Cualquier discrepancia grande entre las fuentes que tenga explicación
-    concreta. Si el mercado da un 45% donde el público da un 61%, casi
-    siempre hay una razón y a veces está publicada.
+  titulares_ausentes: 2          quién falta importa más que cuántos
+  delantero_referencia_ausente: 1
+  portero_titular_ausente: 0
+  calidad_sustituto: alta|media|baja
+  titulares_que_vuelven: 1       las altas cuentan tanto como las bajas
+  jugo_entre_semana: si|no
+  minutos_acumulados_altos: si|no
+  cambio_entrenador_reciente: si|no
+  historico_representativo: si|no    ¿siguen siendo el mismo equipo?
+  clima_adverso: si|no
+  clima_favorece: local|visitante|ninguno
+  algo_en_juego: ambos|solo_local|solo_visitante|ninguno
+
+Fíjate en el sesgo que hay que evitar: si solo buscas "lesionados", solo
+encontrarás malas noticias. Busca también quién VUELVE.
+
+FIABILIDAD DE LA FUENTE
+
+Cada hecho lleva su nivel, porque no vale lo mismo un comunicado del club
+que un rumor de foro:
+
+  A  comunicado oficial, convocatoria, alineación publicada, rueda de prensa
+  B  periodista local acreditado, medio especializado en alineaciones
+  C  prensa deportiva generalista
+  D  redes sociales, foros, rumor sin firma
+
+Y su estado respecto al mercado:
+
+  NOVEDAD          publicado después de la última captura de cuotas
+  YA_CONOCIDA      publicado antes, pero el precio no se movió
+  DESCONTADA       publicado antes y el precio SÍ se movió en esa dirección
+
+Una señal DESCONTADA no debe generar ajuste. Regístrala igual: sirve para
+comprobar después si el mercado reacciona bien o mal a cada tipo de noticia.
 
 CÓMO BUSCAR
 
 Busca por lo que necesitas saber, no por dónde crees que estará. Una consulta
 como "Getafe Celta lesionados alineación probable" encuentra mejores fuentes
-que ir a un periódico concreto: los sitios de fantasy y estadística suelen
-tener alineaciones y partes médicos más completos y actualizados que la
-prensa generalista, porque es su producto.
+que ir a un periódico concreto: los sitios de fantasy y estadística tienen
+partes médicos más completos que la prensa generalista, porque es su producto.
 
-Incluye siempre la fecha o la jornada en la consulta. Sin eso salen noticias
-de temporadas pasadas, y una lesión de hace meses probablemente esté resuelta
-y en cualquier caso ya incorporada al precio de las cuotas.
+Incluye siempre la fecha o la jornada. Sin eso salen noticias de temporadas
+pasadas, y una lesión de hace meses ya está en el precio.
 
-Para el tiempo, busca la previsión de la ciudad A LA HORA DEL PARTIDO. Un
-partido a las 21:00 en septiembre no tiene el tiempo del mediodía, y esa
-diferencia es justo la que importa.
+Para el tiempo, la previsión de la ciudad A LA HORA DEL PARTIDO, no del día.
 
-Liga F tiene mucha menos cobertura que las masculinas. Si buscas y no
-encuentras nada de un partido femenino, dilo: es información en sí misma, y
-mejor que rellenar con suposiciones.
+Liga F tiene mucha menos cobertura. Si no encuentras nada de un partido
+femenino, dilo: es información en sí misma.
 
-REGLAS QUE NO PUEDES SALTARTE
+REGLAS
 
-1. NO cambies una casilla sin una razón concreta y verificable. "Intuición",
-   "sensaciones" o "el Barcelona suele ganar" no son razones. Si no
-   encuentras nada, deja la casilla como está: eso es una respuesta válida y
-   frecuente. Una jornada con cero ajustes es un buen resultado.
+1. Sin razón concreta y verificable, no hay ajuste. "Intuición" o "suele
+   ganar" no son razones. Cero ajustes es una respuesta válida y frecuente.
 
-2. El mercado suele tener razón. Cuando la contradigas, di exactamente qué
-   sabes tú que el mercado no haya podido incorporar ya. Las cuotas se mueven
-   con las noticias, así que una lesión publicada hace tres días ya está en
-   el precio.
+2. Si el precio ya se movió, la información ya está contada. No la cuentes
+   otra vez.
 
-3. Prioriza el VALOR sobre la probabilidad. En la quiniela el premio se
-   reparte entre acertantes: acertar lo que acierta todo el mundo paga poco.
-   Un signo con valor 1,40 que falla a menudo puede ser mejor apuesta que un
-   favorito con valor 0,80.
+3. Prioriza el VALOR sobre la probabilidad. El premio se reparte entre
+   acertantes: acertar lo que acierta todo el mundo paga poco.
 
-4. No inventes datos. Si buscas y no encuentras nada sobre un partido, dilo.
-   Es mucho mejor que rellenar con suposiciones que suenan bien.
+4. No inventes. Si buscas y no encuentras, dilo.
 
-5. Sé conciso. Nadie va a leer tres páginas antes de sellar un boleto.
+5. Máximo 400 palabras de análisis.
 
 CÓMO RESPONDER
 
-Un análisis breve (máximo 400 palabras) con lo que has encontrado que de
-verdad importa, y después un bloque JSON exactamente con esta forma:
+Análisis breve, y después este JSON:
 
 ```json
 {
+  "senales": [
+    {"posicion": 3,
+     "hechos": {"titulares_ausentes": 2, "delantero_referencia_ausente": 1,
+                "calidad_sustituto": "baja", "clima_adverso": true},
+     "fuente_nivel": "A",
+     "estado_mercado": "NOVEDAD|YA_CONOCIDA|DESCONTADA",
+     "resumen": "qué has encontrado, en una frase"}
+  ],
   "ajustes": [
     {"posicion": 3, "signo_antes": "1", "signo_despues": "X",
      "confianza": "alta|media|baja",
-     "razon": "qué sabes y por qué cambia la casilla"}
+     "razon": "por qué, y por qué el mercado no lo ha descontado ya"}
   ],
   "pleno": {"local": "1", "visitante": "0", "razon": "..."},
-  "aviso": "lo que el sistema debería saber y no aparece en los ajustes"
+  "aviso": "lo que el sistema debería saber y no cabe arriba"
 }
 ```
 
-Si no hay nada que ajustar, devuelve "ajustes": [] sin más."""
+Puede haber señales sin ajuste: es lo normal y lo deseable. Una señal
+registrada sirve para medir después aunque hoy no cambie nada."""
 
 
-def reunir_contexto(api: ApiIngesta, temporada: str, jornada: int) -> dict:
-    """Todo lo que el sistema sabe de la jornada, en un solo objeto."""
-    return api.contexto_dashboard(
+CRITICO = """Eres el segundo par de ojos. Otro analista ha propuesto ajustes
+sobre una jornada de quiniela y tu trabajo es intentar tumbarlos.
+
+El fallo típico de un análisis así es construir una historia convincente a
+partir de evidencia débil: tres datos sueltos, una noticia vieja y una
+conclusión que suena bien. Tú estás para detectar eso.
+
+Por cada ajuste propuesto, comprueba:
+
+  - ¿La noticia es reciente, o de hace semanas?
+  - ¿El precio ya se movió en esa dirección? Si sí, ya está contado.
+  - ¿La baja era conocida desde hace días?
+  - ¿El sustituto juega habitualmente? Entonces no es una baja de verdad.
+  - ¿La fuente es un comunicado o un rumor?
+  - ¿Hay fuentes que lo contradigan?
+  - ¿El razonamiento se sostiene, o encadena suposiciones?
+
+No busques equilibrio ni des el visto bueno por cortesía. Si un ajuste está
+bien fundado, dilo en una línea y sigue. Tu utilidad está en los que no lo
+están.
+
+Responde con este JSON:
+
+```json
+{
+  "veredictos": [
+    {"posicion": 3, "veredicto": "mantener|descartar|rebajar",
+     "motivo": "por qué"}
+  ],
+  "resumen": "una frase sobre la calidad general del análisis"
+}
+```"""
+
+
+def reunir_contexto(api: ApiIngesta, temporada: str, jornada: int) -> tuple[dict, dict]:
+    """
+    Todo lo que el sistema sabe de la jornada, y cómo ha ido cambiando.
+
+    El movimiento va aparte porque responde a otra pregunta: no "cuánto vale
+    este signo" sino "cuándo se movió el precio", que es lo que permite saber
+    si una noticia ya está descontada.
+    """
+    datos = api.contexto_dashboard(
         temporada=temporada or None,
         numero_jornada=jornada or None,
     )
+    try:
+        mov = api.contexto_movimiento(
+            temporada=temporada or None,
+            numero_jornada=jornada or None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (sin movimiento de cuotas: {exc})")
+        mov = {}
+    return datos, mov
 
 
-def formatear(datos: dict) -> str:
+def prioridad(terna_lae, terna_mer, terna_mod) -> float:
+    """
+    Cuánta atención merece esta casilla.
+
+    No todos los partidos valen lo mismo. Donde el mercado, el público y
+    nuestro modelo coinciden no hay nada que investigar: buscar noticias
+    igualmente solo añade coste y tienta al modelo a encontrar historias
+    donde no las hay.
+
+    Donde discrepan, en cambio, alguien sabe algo que los demás no. Ahí es
+    donde una búsqueda puede aportar.
+    """
+    p = 0.0
+    if terna_mer and terna_mod:
+        # El modelo contra el mercado: la discrepancia más informativa.
+        p += sum(abs(a - b) for a, b in zip(terna_mer, terna_mod)) * 1.5
+    if terna_mer and terna_lae:
+        # El público contra el mercado: donde está el valor.
+        p += sum(abs(a - b) for a, b in zip(terna_mer, terna_lae))
+    if not terna_mer:
+        # Sin cuotas no hay red de seguridad: conviene mirar.
+        p += 0.5
+    return p
+
+
+def formatear(datos: dict, movimiento: dict | None = None) -> str:
     """
     El estado de la jornada como texto legible.
 
@@ -199,6 +310,8 @@ def formatear(datos: dict) -> str:
             return None
         t = sum(v)
         return [x / t for x in v] if t > 0 else None
+
+    atencion: list[tuple[float, int, str]] = []
 
     for c in sorted(datos.get("casillas", []), key=lambda x: int(x["posicion"])):
         pos = int(c["posicion"])
@@ -236,8 +349,13 @@ def formatear(datos: dict) -> str:
             if vs:
                 valor = f"{max(vs):.2f}"
 
+        p = prioridad(lae, mer, mod)
+        if p >= UMBRAL_ATENCION:
+            atencion.append((p, pos, f"{c['local']} - {c['visitante']}"))
+
         lineas.append(
-            f"{pos:>2}  {(c['local'][:18] + ' - ' + c['visitante'][:18]):<40} "
+            f"{pos:>2}{'*' if p >= UMBRAL_ATENCION else ' '} "
+            f"{(c['local'][:18] + ' - ' + c['visitante'][:18]):<40} "
             f"{(c.get('competicion') or '')[:9]:<10} "
             f"{fmt(lae):>12} {fmt(mer):>12} {fmt(mod):>12} {valor:>6}"
             f"   propuesta: {''.join(prop) or '—'}"
@@ -249,6 +367,61 @@ def formatear(datos: dict) -> str:
         "Las ternas van en orden 1/X/2. Un guion significa que ese dato no",
         "existe para esa casilla, no que sea cero.",
     ]
+
+    # --- Dónde merece la pena gastar búsquedas --------------------------
+    #
+    # Catorce partidos son demasiados para investigarlos todos a fondo, y
+    # además sería contraproducente: buscar noticias de un partido donde
+    # todo el mundo coincide solo sirve para encontrar historias donde no
+    # las hay. Donde el mercado, el público y el modelo discrepan, en
+    # cambio, alguien sabe algo.
+    if atencion:
+        atencion.sort(reverse=True)
+        lineas += [
+            "",
+            "",
+            "DÓNDE MIRAR PRIMERO",
+            "",
+            "Marcadas con * arriba. En estas casillas las tres fuentes no se",
+            "ponen de acuerdo, así que hay algo que los números no explican.",
+            "Busca a fondo en estas; en las demás, solo si te sobra margen.",
+            "",
+        ]
+        for p, pos, nombre in atencion:
+            lineas.append(f"  {pos:>2}. {nombre:<44} discrepancia {p:.2f}")
+
+    # --- Cómo se ha movido el precio ------------------------------------
+    #
+    # Esta es la parte que permite no contar dos veces la misma noticia.
+    mov = (movimiento or {}).get("casillas") or []
+    con_movimiento = [
+        m for m in mov
+        if len({(x.get("franja"), round(x.get("p1") or 0, 3)) for x in m.get("mercado", [])}) > 1
+    ]
+    if con_movimiento:
+        lineas += [
+            "",
+            "",
+            "MOVIMIENTO DE LAS CUOTAS Y DEL PÚBLICO",
+            "",
+            "Si el precio ya se movió en la dirección de una noticia, esa",
+            "noticia ya está contada. No la cuentes otra vez.",
+            "",
+        ]
+        for m in con_movimiento:
+            lineas.append(f"{m['posicion']:>2}. {m['local']} - {m['visitante']}")
+            for fila, etiqueta in ((m.get("mercado", []), "mercado"),
+                                   (m.get("publico", []), "público")):
+                for x in fila:
+                    if x.get("p1") is None:
+                        continue
+                    lineas.append(
+                        f"      {etiqueta:<8} {str(x.get('franja') or '?'):<8} "
+                        f"{x['p1']*100:>3.0f}/{x['px']*100:>3.0f}/{x['p2']*100:>3.0f}"
+                        f"   {x.get('capturado_en') or ''}"
+                    )
+            lineas.append("")
+
     return "\n".join(lineas)
 
 
@@ -321,6 +494,100 @@ def analizar(contexto: str, con_web: bool) -> tuple[str, dict, dict]:
     return texto, ajustes, uso
 
 
+def revisar(contexto: str, texto: str, ajustes: dict) -> tuple[dict, dict]:
+    """
+    Un segundo modelo intenta tumbar los ajustes del primero.
+
+    Un análisis de este tipo falla casi siempre igual: construye una historia
+    convincente a partir de evidencia floja. Tres datos sueltos, una noticia
+    de hace tres semanas y una conclusión que suena razonable. El que la
+    escribe no lo ve, porque acaba de convencerse a sí mismo.
+
+    Un segundo modelo que no ha pasado por ese razonamiento sí lo ve. Y
+    cuesta unos céntimos: menos que la diferencia entre acertar y no.
+    """
+    lista = ajustes.get("ajustes") or []
+    if not lista:
+        return {}, {"tokens_entrada": 0, "tokens_salida": 0, "coste_usd": 0.0,
+                    "busquedas_web": 0}
+
+    cliente = anthropic.Anthropic()
+    mensaje = cliente.messages.create(
+        model=MODELO,
+        max_tokens=8000,
+        system=CRITICO,
+        thinking={"type": "adaptive"},
+        tools=[{"type": "web_search_20260209", "name": "web_search",
+                "max_uses": 5}],
+        messages=[{
+            "role": "user",
+            "content": (
+                f"{contexto}\n\n"
+                f"--- ANÁLISIS A REVISAR ---\n\n{texto}\n\n"
+                "Intenta tumbar cada ajuste. Comprueba las fechas de las "
+                "noticias y si el precio ya se había movido."
+            ),
+        }],
+    )
+
+    if mensaje.stop_reason == "refusal":
+        return {}, {"tokens_entrada": 0, "tokens_salida": 0, "coste_usd": 0.0,
+                    "busquedas_web": 0}
+
+    salida = "".join(b.text for b in mensaje.content if b.type == "text")
+    veredictos = {}
+    if "```json" in salida:
+        try:
+            veredictos = json.loads(
+                salida.split("```json", 1)[1].split("```", 1)[0]
+            )
+        except json.JSONDecodeError:
+            pass
+    veredictos["_texto"] = salida
+
+    uso = {
+        "tokens_entrada": mensaje.usage.input_tokens,
+        "tokens_salida": mensaje.usage.output_tokens,
+        "coste_usd": round(
+            mensaje.usage.input_tokens / 1e6 * PRECIO_ENTRADA
+            + mensaje.usage.output_tokens / 1e6 * PRECIO_SALIDA, 5),
+        "busquedas_web": sum(
+            1 for b in mensaje.content if b.type == "server_tool_use"),
+    }
+    return veredictos, uso
+
+
+def aplicar_veredictos(ajustes: dict, veredictos: dict) -> dict:
+    """
+    Se queda solo con los ajustes que aguantan la revisión.
+
+    Descartar es descartar. Rebajar mantiene el ajuste pero le baja la
+    confianza, que es lo que decide después si el optimizador se fía.
+    """
+    v = {int(x["posicion"]): x for x in (veredictos.get("veredictos") or [])
+         if isinstance(x, dict) and "posicion" in x}
+    if not v:
+        return ajustes
+
+    orden = {"alta": "media", "media": "baja", "baja": "baja"}
+    sobreviven = []
+    for a in ajustes.get("ajustes") or []:
+        pos = int(a.get("posicion", 0))
+        veredicto = (v.get(pos) or {}).get("veredicto", "mantener")
+        if veredicto == "descartar":
+            a["descartado_por_revision"] = (v[pos] or {}).get("motivo", "")
+            ajustes.setdefault("descartados", []).append(a)
+            continue
+        if veredicto == "rebajar":
+            a["confianza"] = orden.get(a.get("confianza", "media"), "baja")
+            a["rebajado_por_revision"] = (v[pos] or {}).get("motivo", "")
+        sobreviven.append(a)
+
+    ajustes["ajustes"] = sobreviven
+    ajustes["revision"] = veredictos
+    return ajustes
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Analiza la jornada con Claude.")
     p.add_argument("--temporada", default="")
@@ -329,6 +596,10 @@ def main() -> int:
     p.add_argument(
         "--sin-web", action="store_true",
         help="no buscar en internet: más barato, pero sin bajas ni clima",
+    )
+    p.add_argument(
+        "--sin-revision", action="store_true",
+        help="no pasar los ajustes por el segundo modelo",
     )
     p.add_argument("--dry-run", action="store_true", help="no guarda nada")
     args = p.parse_args()
@@ -341,7 +612,7 @@ def main() -> int:
         return 1
 
     api = ApiIngesta()
-    datos = reunir_contexto(api, args.temporada, args.jornada)
+    datos, movimiento = reunir_contexto(api, args.temporada, args.jornada)
     if not datos.get("jornada"):
         print("No hay ninguna jornada cargada.")
         return 1
@@ -349,7 +620,7 @@ def main() -> int:
     j = datos["jornada"]
     print(f"Jornada {j['numero']} · {j['temporada']}")
 
-    contexto = formatear(datos)
+    contexto = formatear(datos, movimiento)
     print(f"  contexto: {len(contexto)} caracteres\n")
 
     print(f"Consultando a {MODELO}" + (" con búsqueda web" if not args.sin_web else "") + "...")
@@ -361,6 +632,33 @@ def main() -> int:
         f"{uso['busquedas_web']} búsquedas · ${uso['coste_usd']:.4f}\n"
     )
     print(texto)
+
+    if not args.sin_revision and isinstance(ajustes, dict) and ajustes.get("ajustes"):
+        print("\nSegunda opinión...")
+        veredictos, uso_rev = revisar(contexto, texto, ajustes)
+        if veredictos:
+            antes = len(ajustes.get("ajustes") or [])
+            ajustes = aplicar_veredictos(ajustes, veredictos)
+            despues = len(ajustes.get("ajustes") or [])
+            print(f"  {antes} → {despues} ajustes · ${uso_rev['coste_usd']:.4f}")
+            if veredictos.get("resumen"):
+                print(f"  {veredictos['resumen']}")
+            uso["coste_usd"] = round(uso["coste_usd"] + uso_rev["coste_usd"], 5)
+            uso["tokens_entrada"] += uso_rev["tokens_entrada"]
+            uso["tokens_salida"] += uso_rev["tokens_salida"]
+            uso["busquedas_web"] += uso_rev["busquedas_web"]
+
+    senales = ajustes.get("senales", []) if isinstance(ajustes, dict) else []
+    if senales:
+        print(f"\n{len(senales)} señales encontradas")
+        for x in senales:
+            hechos = ", ".join(
+                f"{k}={v}" for k, v in (x.get("hechos") or {}).items()
+            )
+            print(
+                f"  casilla {x.get('posicion')}: [{x.get('fuente_nivel', '?')}] "
+                f"{x.get('estado_mercado', '?')}  {hechos}"
+            )
 
     lista = ajustes.get("ajustes", []) if isinstance(ajustes, dict) else []
     print(f"\n{len(lista)} ajustes propuestos")
@@ -381,6 +679,9 @@ def main() -> int:
         "tipo": args.tipo,
         "analisis": texto,
         "ajustes": json.dumps(ajustes, ensure_ascii=False),
+        "senales": json.dumps(
+            ajustes.get("senales") or [], ensure_ascii=False
+        ) if isinstance(ajustes, dict) else None,
         **uso,
     })
     print(f"\nGuardado: análisis {r.get('id')}")

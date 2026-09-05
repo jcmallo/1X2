@@ -484,6 +484,28 @@ class ApiIngesta:
             timeout=90,
         )
 
+    def contexto_movimiento(
+        self,
+        *,
+        temporada: str | None = None,
+        numero_jornada: int | None = None,
+    ) -> dict:
+        """
+        Cómo han ido cambiando cuotas y porcentajes durante la semana.
+
+        contexto_dashboard devuelve la foto; esto devuelve la película. Sirve
+        para saber si una noticia ya movió el precio antes de volver a
+        contarla.
+        """
+        params: dict = {}
+        if temporada:
+            params["temporada"] = temporada
+        if numero_jornada is not None:
+            params["numero_jornada"] = int(numero_jornada)
+        return self._request_json(
+            "GET", "contexto_movimiento.php", params=params, timeout=45,
+        )
+
     def guardar_analisis_ia(self, payload: dict) -> dict:
         """
         Guarda el análisis de la jornada hecho por Claude.

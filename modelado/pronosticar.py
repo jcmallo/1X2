@@ -146,6 +146,50 @@ def descargar_resultados(api: ApiIngesta) -> list[dict]:
     return todos
 
 
+def calidad(p: "np.ndarray", t: "np.ndarray") -> tuple[float, float, float]:
+    """
+    Tres medidas de si las probabilidades valen algo, más allá del acierto.
+
+    El acierto solo dice si el signo más probable salió. No distingue entre
+    decir 40% y decir 90%, y aquí esa diferencia es todo: el sistema reparte
+    dobles y triples según la probabilidad, no según cuál es la mayor.
+
+      Brier   error cuadrático medio sobre las tres probabilidades. Penaliza
+              equivocarse con confianza.
+      RPS     como el Brier pero respetando que 1, X y 2 están ordenados:
+              confundir un 1 con una X es menos grave que confundirlo con un
+              2. Es la medida estándar en pronóstico de fútbol.
+      ECE     error de calibración. Mide si cuando el modelo dice 60%, pasa
+              el 60% de las veces. Por debajo de 0,02 se considera bien
+              calibrado. Un modelo puede acertar mucho y estar mal
+              calibrado; entonces reparte mal las apuestas.
+    """
+    n = len(t)
+    real = np.zeros_like(p)
+    real[np.arange(n), t] = 1.0
+
+    brier = float(np.mean(np.sum((p - real) ** 2, axis=1)))
+
+    # RPS: diferencias acumuladas, normalizadas por K-1.
+    acum_p = np.cumsum(p, axis=1)[:, :-1]
+    acum_r = np.cumsum(real, axis=1)[:, :-1]
+    rps = float(np.mean(np.sum((acum_p - acum_r) ** 2, axis=1)) / (p.shape[1] - 1))
+
+    # ECE: se agrupa por la probabilidad que el modelo dio al signo que
+    # eligió, y se compara con la frecuencia real de acierto en cada tramo.
+    conf = p.max(axis=1)
+    correcto = (p.argmax(axis=1) == t).astype(float)
+    bordes = np.linspace(0.0, 1.0, 11)
+    ece = 0.0
+    for lo, hi in zip(bordes[:-1], bordes[1:]):
+        m = (conf > lo) & (conf <= hi)
+        if m.sum() == 0:
+            continue
+        ece += m.sum() / n * abs(correcto[m].mean() - conf[m].mean())
+
+    return brier, rps, float(ece)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="Entrena el Elo y pronostica una jornada."
@@ -197,7 +241,10 @@ def main() -> int:
     frecuencias = np.bincount(ya[:corte], minlength=3) / corte
     aptas: set[str] = set()
 
-    print(f"  {'competición':<20} {'n':>5} {'acierto':>8} {'mejora':>9}")
+    print(
+        f"  {'competición':<20} {'n':>5} {'acierto':>8} {'mejora':>9} "
+        f"{'Brier':>8} {'RPS':>7} {'ECE':>7}"
+    )
     for comp in sorted({c for c, *_ in meta_test if c}) + [None]:
         idx = [
             i for i, (c, *_) in enumerate(meta_test)
@@ -211,6 +258,7 @@ def main() -> int:
         ll = float(-np.mean(np.log(np.clip(p[np.arange(len(t)), t], 1e-9, 1))))
         base = float(-np.mean(np.log(frecuencias[t])))
         mejora = base - ll
+        b, rps, ece = calidad(p, t)
 
         apta = comp is not None and mejora >= MEJORA_MINIMA
         if apta:
@@ -218,7 +266,7 @@ def main() -> int:
         marca = "  se publica" if apta else ("" if comp is None else "  se descarta")
         print(
             f"  {(comp or 'TODAS'):<20} {len(idx):>5} {acierto:>7.1%} "
-            f"{mejora:>+9.4f}{marca}"
+            f"{mejora:>+9.4f} {b:>8.4f} {rps:>7.4f} {ece:>7.4f}{marca}"
         )
 
     if not aptas:
