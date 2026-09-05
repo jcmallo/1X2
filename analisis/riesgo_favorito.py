@@ -206,6 +206,17 @@ def main() -> int:
             print(f"    jornada {j.get('numero_jornada')}: {exc}")
             continue
 
+        # Si algo vuelve a no cuadrar, mejor ver la forma real del dato que
+        # deducirla de un cero.
+        if not muestras and not resultados and d.get("casillas"):
+            ej = next((x for x in d["casillas"]
+                       if int(x.get("posicion", 0)) != 15), None)
+            if ej is not None and not globals().get("_mostrado"):
+                globals()["_mostrado"] = True
+                print(f"    (ejemplo de casilla: probabilidades="
+                      f"{list((ej.get('probabilidades') or {}).keys())} "
+                      f"mercado={list((ej.get('mercado') or {}).keys())})")
+
         hubo = False
         for c in d.get("casillas", []):
             if int(c.get("posicion", 0)) == 15:
@@ -213,8 +224,11 @@ def main() -> int:
             pr = c.get("probabilidades") or {}
             lae = terna(pr.get("LAE_CIERRE") or pr.get("LAE_ESTIMADO"),
                         "p1", "px", "p2")
-            mer = terna(c.get("mercado"), "prob_mercado_local",
-                        "prob_mercado_empate", "prob_mercado_visitante")
+            # contexto_dashboard.php devuelve el mercado con p1/px/p2, no
+            # con los nombres de la columna de la tabla. Usar los de la
+            # tabla hacía que la terna fuese None siempre y el script
+            # descartara todas las casillas antes de mirarlas.
+            mer = terna(c.get("mercado"), "p1", "px", "p2")
             if not lae or not mer:
                 continue
             hubo = True
@@ -301,8 +315,27 @@ def main() -> int:
     Xa, ya = np.array(X), np.array(y)
     i_elo = caracteristicas.NOMBRES.index("elo_diferencia")
     i_forma = caracteristicas.NOMBRES.index("forma_diferencia")
-    extra = (Xa[:, i_elo] - Xa[:, i_forma]).reshape(-1, 1)
-    Xb = np.hstack([Xa, extra])
+    elo = Xa[:, i_elo]
+    forma = Xa[:, i_forma]
+
+    # La resta elo − forma NO sirve para probar nada: es una combinación
+    # lineal de dos columnas que el modelo ya tiene, y un modelo lineal no
+    # puede sacar nada de eso. Es colineal, el espacio de coeficientes es el
+    # mismo. La primera versión de este script cometía ese error y por eso
+    # daba +0,0001, que era ruido numérico y no un resultado.
+    #
+    # Lo que la regresión no puede expresar es un PRODUCTO. Se prueban dos:
+    #
+    #   producto    elo × forma, la interacción sin más
+    #   asimétrico  la idea concreta: "equipo fuerte EN MALA FORMA es
+    #               desproporcionadamente vulnerable", que solo se activa
+    #               cuando se dan las dos condiciones a la vez, y su
+    #               simétrica para el visitante
+    producto = (elo * forma).reshape(-1, 1)
+
+    fuerte_mal = np.maximum(elo, 0) * np.maximum(-forma, 0)
+    debil_bien = np.maximum(-elo, 0) * np.maximum(forma, 0)
+    asimetrico = np.column_stack([fuerte_mal, debil_bien])
 
     corte = int(len(Xa) * 0.80)
     print(f"\n  {corte} para entrenar, {len(Xa) - corte} para comprobar")
@@ -317,20 +350,42 @@ def main() -> int:
         return float(-np.mean(np.log(np.clip(p[np.arange(len(t)), t], 1e-9, 1))))
 
     ll_sin = perdida(Xa)
-    ll_con = perdida(Xb)
-    print(f"\n  {'sin la brecha':<20} log-loss {ll_sin:.4f}")
-    print(f"  {'con la brecha':<20} log-loss {ll_con:.4f}")
-    print(f"  {'diferencia':<20}          {ll_sin - ll_con:+.4f}")
+    ll_resta = perdida(np.hstack([Xa, (elo - forma).reshape(-1, 1)]))
+    ll_prod = perdida(np.hstack([Xa, producto]))
+    ll_asim = perdida(np.hstack([Xa, asimetrico]))
+
+    # Cuántos partidos activan de verdad la interacción asimétrica. Si son
+    # pocos, una mejora pequeña en el promedio de todos puede ser una mejora
+    # grande donde actúa, o puede ser nada: sin este número no se distingue.
+    activos = int((fuerte_mal > 0).sum() + (debil_bien > 0).sum())
+    print(f"\n  la interacción asimétrica se activa en {activos} de "
+          f"{len(Xa)} partidos ({100 * activos / len(Xa):.0f}%)")
+
+    print(f"\n  {'variante':<32} {'log-loss':>9} {'gana':>8}")
+    print(f"  {'sin nada (como está)':<32} {ll_sin:>9.4f}")
+    print(f"  {'resta elo − forma':<32} {ll_resta:>9.4f} "
+          f"{ll_sin - ll_resta:>+8.4f}")
+    print(f"  {'producto elo × forma':<32} {ll_prod:>9.4f} "
+          f"{ll_sin - ll_prod:>+8.4f}")
+    print(f"  {'fuerte-en-mala-forma (asim.)':<32} {ll_asim:>9.4f} "
+          f"{ll_sin - ll_asim:>+8.4f}")
+
     print()
-    if ll_sin - ll_con > 0.002:
-        print("  Aporta. Y recuerda por qué puede aportar aunque el Elo y la")
-        print("  forma ya estén dentro: la regresión los SUMA, y esto es un")
-        print("  producto que una suma no puede expresar.")
+    print("  La fila de la RESTA tiene que dar cero o casi: es una")
+    print("  combinación lineal de dos columnas que el modelo ya tiene, y")
+    print("  un modelo lineal no puede sacar nada de eso. Está puesta como")
+    print("  control: si esa fila diera algo grande, el test estaría mal.")
+
+    mejor = max(ll_sin - ll_prod, ll_sin - ll_asim)
+    print()
+    if mejor > 0.002:
+        print(f"  La interacción aporta {mejor:+.4f}. Es lo que la regresión")
+        print("  no podía expresar por sí sola.")
     else:
-        print("  No aporta al resultado. Era lo esperable: el mercado ya")
-        print("  descuenta la mala racha del favorito, así que esa")
-        print("  información no es nueva para predecir quién gana.")
-        print("  Eso no dice nada sobre la pregunta B, que es la que importa.")
+        print("  Ninguna interacción aporta al resultado. Era lo esperable:")
+        print("  el mercado ya descuenta la mala racha del favorito, así que")
+        print("  eso no es información nueva para saber quién gana.")
+        print("  No dice nada sobre la pregunta B, que es la que importa.")
 
     return 0
 
