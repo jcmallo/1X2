@@ -1,28 +1,36 @@
-Sustituye  ia/analizar.py
+GITHUB — sustituye estos archivos
+=================================
 
-ANTES, EN phpMyAdmin:
+   ia/analizar.py
+   web/index.php
+   web/lanzar_ia.php                (nuevo)
+   web/config_ia.php.ejemplo        (nuevo — la plantilla, sin secretos)
+   php/guardar_analisis_ia.php
+   php/04_tabla_lanzamientos_ia.sql (nuevo)
+   .github/workflows/analizar_ia.yml
 
-    SHOW COLUMNS FROM ia_analisis_jornada LIKE 'senales';
+AÑADE AL .gitignore
 
-Si no devuelve nada (que es lo que explica el HTTP 500):
+   web/config_ia.php
 
-    ALTER TABLE ia_analisis_jornada
-      ADD COLUMN senales MEDIUMTEXT DEFAULT NULL AFTER ajustes;
+   Ese archivo lleva el token de GitHub y la clave del botón. Solo existe
+   en IONOS.
 
-QUÉ CAMBIA EN EL CÓDIGO
+QUÉ CAMBIA
 
-El crítico distinguía mal entre "la evidencia es floja" y "el dato es
-falso". En la primera ejecución real escribió que una noticia de catorce
-meses se había leído al revés —el fichaje de un entrenador entendido como
-su destitución— y aun así votó "rebajar". El ajuste sobrevivió con
-confianza baja y habría entrado en el boleto.
+El análisis ya no lo dispara solo un cron. El panel tiene un botón que lo
+lanza cuando tú decides, dentro de las 12 horas anteriores al primer
+partido.
 
-Ahora el prompt le dice que los tres veredictos no son una escala de
-severidad sino tres cosas distintas: descartar es para premisas falsas,
-rebajar para evidencia floja pero cierta. Y le pide que compruebe que sus
-veredictos dicen lo mismo que su resumen.
+El cron sigue existiendo como red: si un sábado no estás delante del
+ordenador, salta solo a las 5 horas. Si ya lanzaste tú, la clave única lo
+impide y no gasta nada.
 
-Como eso depende de que haga caso, hay además una red de seguridad en el
-código: si el motivo contiene "malinterpretado", "inexistente", "al revés"
-o similares y el veredicto no es "descartar", se descarta igualmente y se
-avisa por pantalla.
+El circuito:
+
+   panel → lanzar_ia.php → API de GitHub → workflow → analizar.py
+        → guardar_analisis_ia.php → cierra el candado
+        → el panel rehace la propuesta y congela el boleto
+
+analizar.py acepta --solicitud N. Cuando viene del botón se salta la
+ventana de las 5 horas, porque lanzar_ia.php ya comprobó la de 12.

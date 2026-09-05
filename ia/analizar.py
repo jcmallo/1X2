@@ -45,6 +45,8 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import os
 import sys
 
@@ -76,6 +78,26 @@ MAX_ATENCION = 6
 # pero sí llena el contexto. Dos por casilla marcada, más margen.
 MAX_BUSQUEDAS = 16
 PRECIO_BUSQUEDA = 0.01  # USD por búsqueda, aparte de los tokens
+
+# Cuándo analizar: cinco horas antes del primer partido de la jornada.
+#
+# No antes: a 24 horas no hay alineaciones probables, muchas ruedas de prensa
+# no se han dado y la previsión del tiempo es bastante peor. Se pagaría por
+# leer una prensa que aún no ha publicado lo que importa.
+#
+# No después: la quiniela cierra minutos antes del primer partido, y hay que
+# dejar margen para sellar el boleto. En la ejecución del 5 de septiembre el
+# análisis llegó con cuatro partidos ya empezados.
+#
+# La ventana es de media hora a cada lado porque el cron de GitHub no es
+# puntual: puede retrasarse unos minutos cuando hay cola.
+HORAS_ANTES = 5.0
+MARGEN_HORAS = 0.5
+
+# Los horarios de los partidos se guardan en hora española, sin zona. El
+# runner de GitHub va en UTC, así que hay que decirlo explícitamente o el
+# cálculo se va dos horas en verano.
+ZONA = ZoneInfo("Europe/Madrid")
 
 # Precios por millón de tokens, para poder registrar lo que cuesta cada
 # ejecución en lugar de estimarlo.
@@ -268,6 +290,27 @@ Responde con este JSON:
   "resumen": "una frase sobre la calidad general del análisis"
 }
 ```"""
+
+
+def horas_hasta_el_cierre(datos: dict) -> float | None:
+    """
+    Cuánto falta para el primer partido, que es cuando cierra la quiniela.
+
+    Devuelve None si ninguna casilla tiene hora, que pasa cuando aún no se ha
+    vinculado el boleto con los partidos.
+    """
+    horas = []
+    ahora = datetime.now(ZONA)
+    for c in datos.get("casillas", []):
+        crudo = c.get("fecha_hora_inicio")
+        if not crudo:
+            continue
+        try:
+            inicio = datetime.fromisoformat(str(crudo)).replace(tzinfo=ZONA)
+        except ValueError:
+            continue
+        horas.append((inicio - ahora).total_seconds() / 3600)
+    return min(horas) if horas else None
 
 
 def reunir_contexto(api: ApiIngesta, temporada: str, jornada: int) -> tuple[dict, dict]:
@@ -667,6 +710,14 @@ def main() -> int:
         help="no buscar en internet: más barato, pero sin bajas ni clima",
     )
     p.add_argument(
+        "--solicitud", type=int, default=0,
+        help="id del lanzamiento pedido desde el panel; cierra su candado",
+    )
+    p.add_argument(
+        "--forzar", action="store_true",
+        help="analizar aunque no sea la ventana de las 5 h",
+    )
+    p.add_argument(
         "--sin-revision", action="store_true",
         help="no pasar los ajustes por el segundo modelo",
     )
@@ -688,6 +739,38 @@ def main() -> int:
 
     j = datos["jornada"]
     print(f"Jornada {j['numero']} · {j['temporada']}")
+
+    # --- ¿Es el momento? ------------------------------------------------
+    #
+    # Salir aquí no cuesta nada: no se ha llamado todavía a Claude ni se ha
+    # buscado nada. Por eso el cron puede dispararse muchas veces al día sin
+    # que importe: solo una cae dentro de la ventana.
+    # Un lanzamiento pedido desde el panel ya pasó por la ventana de 12 horas
+    # en lanzar_ia.php. Volver a comprobarla aquí con la de 5 lo rechazaría.
+    if args.solicitud:
+        args.forzar = True
+
+    faltan = horas_hasta_el_cierre(datos)
+    if faltan is None:
+        print("  Ninguna casilla tiene hora todavía: falta vincular el boleto.")
+        if not args.forzar:
+            return 0
+    elif not args.forzar:
+        print(f"  Faltan {faltan:.1f} h para el primer partido.")
+        if faltan > HORAS_ANTES + MARGEN_HORAS:
+            print(
+                f"  Aún es pronto: se analiza a {HORAS_ANTES:.0f} h del "
+                "cierre, cuando ya hay alineaciones probables. No se gasta "
+                "nada."
+            )
+            return 0
+        if faltan < HORAS_ANTES - MARGEN_HORAS:
+            print(
+                "  Demasiado tarde: o la jornada está a punto de cerrar o ya "
+                "hay partidos en juego. Analizar ahora sería pagar por "
+                "noticias que ya no se pueden jugar."
+            )
+            return 0
 
     contexto = formatear(datos, movimiento)
     print(f"  contexto: {len(contexto)} caracteres\n")
@@ -748,6 +831,7 @@ def main() -> int:
         "tipo": args.tipo,
         "analisis": texto,
         "ajustes": json.dumps(ajustes, ensure_ascii=False),
+        "solicitud_id": args.solicitud or "",
         "senales": json.dumps(
             ajustes.get("senales") or [], ensure_ascii=False
         ) if isinstance(ajustes, dict) else None,
