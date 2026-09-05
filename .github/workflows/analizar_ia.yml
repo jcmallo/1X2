@@ -8,7 +8,12 @@ name: Analizar jornada con IA
 # Claude todo lo que el sistema sabe, le deja buscar el contexto que falta y
 # le pide ajustes justificados uno a uno.
 #
-# Cuesta unos 0,17 EUR por ejecución. El boleto de una jornada cuesta 6 EUR.
+# Van dos modelos, no uno: el primero busca y propone, el segundo intenta
+# tumbar lo que ha propuesto. Un análisis así falla casi siempre igual —
+# construye una historia convincente sobre evidencia floja— y el que la
+# escribe no lo ve porque acaba de convencerse a sí mismo.
+#
+# Cuesta unos 0,25 EUR por ejecución. El boleto de una jornada cuesta 6 EUR.
 #
 # Va DESPUÉS de proponer el boleto: analiza la propuesta ya calculada en
 # lugar de sustituirla. Y no la modifica: guarda los ajustes sugeridos con su
@@ -35,6 +40,11 @@ on:
         default: "T-24"
         type: choice
         options: ["T-72", "T-24", "T-2", "CIERRE"]
+      sin_revision:
+        description: "Saltar la segunda opinión que revisa los ajustes"
+        required: false
+        default: false
+        type: boolean
       sin_web:
         description: "No buscar en internet (más barato, sin bajas ni clima)"
         required: false
@@ -84,5 +94,6 @@ jobs:
           if [ -n "${{ inputs.temporada }}" ]; then ARGS="$ARGS --temporada ${{ inputs.temporada }}"; fi
           if [ -n "${{ inputs.jornada }}" ]; then ARGS="$ARGS --jornada ${{ inputs.jornada }}"; fi
           if [ "${{ inputs.sin_web }}" = "true" ]; then ARGS="$ARGS --sin-web"; fi
+          if [ "${{ inputs.sin_revision }}" = "true" ]; then ARGS="$ARGS --sin-revision"; fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           python -m ia.analizar $ARGS
