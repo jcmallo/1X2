@@ -293,9 +293,13 @@ def main() -> int:
                 "equipo_visitante_impreso": limpiar_equipo(str(pt.get("visitante", ""))) + marca,
             }
 
-            # El signo de la casilla 15 es de goles y va en su propia tabla.
-            if pos < 15 and signos[pos - 1]:
-                casilla["signo_oficial"] = signos[pos - 1]
+            if pos < 15:
+                if signos[pos - 1]:
+                    casilla["signo_oficial"] = signos[pos - 1]
+            elif signos[14]:
+                # El resultado del Pleno son goles, no 1/X/2: va en su propio
+                # campo. SELAE lo manda como '11', 'M2', '0M' o '1-1'.
+                casilla["signo_pleno_oficial"] = signos[14]
             if pos in ternas:
                 casilla["prob_lae"] = ternas[pos]
 
