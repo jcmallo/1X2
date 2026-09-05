@@ -75,6 +75,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from ingestion.api_client import ApiIngesta          # noqa: E402
 from modelado import caracteristicas                  # noqa: E402
 
+# El vinculador semanal ya resuelve el problema de que el boleto escriba
+# 'AT.MADRID' donde la tabla pone 'Atlético de Madrid': tiene tabla de
+# alias, filtro de palabras de relleno y un umbral de parecido ya calibrado.
+# Escribir otra versión aquí habría sido tener dos criterios distintos para
+# lo mismo y descubrir la diferencia en el peor momento.
+from mercado.vincular_boleto import normalizar, parecido, UMBRAL  # noqa: E402
+
 
 def descargar_resultados(api: ApiIngesta) -> list[dict]:
     """Todos los partidos con resultado, paginando."""
@@ -108,6 +115,65 @@ def clave(fecha: str, local: str, visitante: str) -> str:
         return s[:6]
 
     return f"{(fecha or '')[:10]}|{limpio(local)}|{limpio(visitante)}"
+
+
+def temporada_de(fecha: str) -> str:
+    """La etiqueta de temporada de una fecha. En España no se juega en julio."""
+    d = datetime.fromisoformat(fecha)
+    a = d.year if d.month >= 7 else d.year - 1
+    return f"{a}-{str(a + 1)[2:]}"
+
+
+def indexar(filas: list[dict]) -> dict:
+    """
+    Los partidos ordenados por temporada y por par de equipos normalizado.
+
+    La temporada es lo que desambigua: dentro de una, un enfrentamiento con
+    un local y un visitante concretos ocurre una sola vez. Así no hace falta
+    la fecha del partido, que es justo lo que les falta a las jornadas
+    viejas del boleto — nunca se vincularon con la tabla de partidos.
+    """
+    idx: dict = {}
+    for f in filas:
+        try:
+            t = temporada_de(f["fecha_hora_inicio"])
+            k = clave(f["fecha_hora_inicio"], f["equipo_local"],
+                      f["equipo_visitante"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        par = (normalizar(f.get("equipo_local", "")),
+               normalizar(f.get("equipo_visitante", "")))
+        idx.setdefault(t, {}).setdefault(par, []).append(k)
+    return idx
+
+
+def emparejar(casilla: dict, temporada: str, idx: dict) -> str | None:
+    """
+    Encuentra el partido de una casilla del boleto dentro de su temporada.
+
+    Primero por nombre normalizado exacto, que resuelve la mayoría de golpe.
+    Si eso falla, por parecido con el mismo umbral que usa el vinculador
+    semanal (0,72), exigiendo que casen los DOS equipos: con uno solo,
+    'Atlético de Madrid' y 'Real Madrid' serían el mismo partido.
+    """
+    dela = idx.get(temporada)
+    if not dela:
+        return None
+
+    par = (normalizar(casilla.get("local") or ""),
+           normalizar(casilla.get("visitante") or ""))
+    exacto = dela.get(par)
+    if exacto and len(exacto) == 1:
+        return exacto[0]
+
+    mejor, mejor_p = None, 0.0
+    for (nl, nv), claves in dela.items():
+        if len(claves) != 1:
+            continue
+        p = min(parecido(par[0], nl), parecido(par[1], nv))
+        if p > mejor_p:
+            mejor, mejor_p = claves[0], p
+    return mejor if mejor_p >= UMBRAL else None
 
 
 def brechas(filas: list[dict]) -> tuple[dict[str, float], dict[str, str]]:
@@ -192,8 +258,8 @@ def correlacion(x: list[float], y: list[float]) -> tuple[float, float]:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--jornadas", type=int, default=50,
-                   help="cuántas jornadas mirar hacia atrás")
+    p.add_argument("--jornadas", type=int, default=0,
+                   help="cuántas jornadas mirar hacia atrás (0 = todas)")
     args = p.parse_args()
 
     api = ApiIngesta()
@@ -205,6 +271,12 @@ def main() -> int:
     print("Calculando la brecha de cada partido...")
     b, signos = brechas(filas)
     print(f"  {len(b)} brechas, {len(signos)} con signo conocido")
+    print(f"  campos que trae cada resultado: {sorted(filas[0].keys())}"
+          if filas else "  (sin resultados)")
+
+    idx = indexar(filas)
+    print(f"  {sum(len(v) for v in idx.values())} pares indexados en "
+          f"{len(idx)} temporadas")
 
     # ------------------------------------------------------------------
     # Inventario: ¿hasta dónde llegan los porcentajes de LAE?
@@ -242,6 +314,7 @@ def main() -> int:
     resultados = []        # (brecha, gano_el_favorito)
     con_lae = 0
     sin_emparejar = 0
+    fallos: list[dict] = []
 
     for j in jornadas:
         try:
@@ -280,10 +353,14 @@ def main() -> int:
                 continue
             hubo = True
 
-            k = clave(c.get("fecha_hora_inicio") or "",
-                      c.get("local") or "", c.get("visitante") or "")
-            if k not in b:
+            # Se intentan varias vías porque las jornadas viejas no están
+            # vinculadas con la tabla de partidos: llegan sin partido_id y
+            # sin fecha, así que la clave con fecha no puede casar.
+            k = emparejar(c, j.get("etiqueta_temporada") or "", idx)
+            if k is None:
                 sin_emparejar += 1
+                if len(fallos) < 6:
+                    fallos.append(c)
                 continue
 
             # El favorito del PÚBLICO: a quién juega más gente. La pregunta
@@ -296,8 +373,11 @@ def main() -> int:
             # La brecha está orientada al local; para el visitante hay que
             # darle la vuelta, o los dos casos se cancelarían entre sí.
             brecha = b[k] if i == 0 else -b[k]
-            real = signos.get(k)
-            if real is None:
+            # signo_oficial viene en la propia casilla del boleto: es el
+            # resultado tal como lo publica LAE. Ir a buscarlo a la tabla de
+            # partidos añadía una dependencia que no hacía falta.
+            real = c.get("signo_oficial") or signos.get(k)
+            if real not in ("1", "X", "2"):
                 continue
 
             acerto = 1.0 if real == ("1" if i == 0 else "2") else 0.0
@@ -320,9 +400,33 @@ def main() -> int:
         print(f"  {sin_emparejar} casillas que no casan con ningún resultado")
         pct = 100 * sin_emparejar / max(sin_emparejar + len(resultados), 1)
         if pct > 20:
-            print(f"    ATENCIÓN: es el {pct:.0f}%. Los nombres del boleto y")
-            print("    los de la tabla de resultados no se están emparejando")
-            print("    bien, y lo de abajo mide una submuestra sesgada.")
+            print(f"    ATENCIÓN: es el {pct:.0f}%. Lo de abajo mediría una")
+            print("    submuestra sesgada, si es que queda algo que medir.")
+
+            # En vez de dejar deducir la causa de un cero, se enseña el dato
+            # tal como llega y con qué se ha intentado comparar. Cada
+            # ejecución de este script cuesta minutos, así que conviene que
+            # una sola diga qué está pasando.
+            print("\n    CASILLAS QUE NO CASAN, TAL COMO LLEGAN:")
+            for c in fallos:
+                print(f"      pos {c.get('posicion')}  "
+                      f"partido_id={c.get('partido_id')}  "
+                      f"fecha={c.get('fecha_hora_inicio')}  "
+                      f"signo={c.get('signo_oficial')}")
+                print(f"        '{c.get('local')}' vs '{c.get('visitante')}'")
+                print(f"        normalizado: '{normalizar(c.get('local') or '')}'"
+                      f" / '{normalizar(c.get('visitante') or '')}'")
+
+            print("\n    ASÍ SE LLAMAN LOS EQUIPOS EN LOS RESULTADOS:")
+            vistos = []
+            for f in filas[-400:]:
+                n = f.get("equipo_local", "")
+                if n and n not in vistos:
+                    vistos.append(n)
+                if len(vistos) >= 12:
+                    break
+            for n in vistos:
+                print(f"      '{n}'  →  '{normalizar(n)}'")
 
     # ------------------------------------------------------------------
     # B. ¿Acierta menos el público cuando juega a la reputación?

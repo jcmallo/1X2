@@ -1,70 +1,53 @@
-Sustituye  analisis/riesgo_favorito.py
+Sustituye:
+    analisis/riesgo_favorito.py
+    .github/workflows/riesgo_favorito.yml   (solo para que mire todas por defecto)
 
-El workflow no cambia. Actions → "Riesgo del favorito" → Run workflow.
-Deja el campo de jornadas vacío o pon 0 para mirarlas todas.
-
-Tarda unos minutos: recorre las jornadas de todas las temporadas, una
-llamada por jornada.
+Actions → "Riesgo del favorito" → Run workflow. Deja el campo como está.
 
 
-LO QUE YA SABEMOS DE LA EJECUCIÓN ANTERIOR
+POR QUÉ FALLABA EL 100% DE LOS EMPAREJAMIENTOS
 
-A está cerrada, en negativo. La interacción se activa en 962 de 4.407
-partidos —o sea que no fue falta de muestra— y aun así empeora el log-loss:
--0,0005 el producto, -0,0002 la asimétrica. El control dio +0,0001, así que
-el test estaba bien montado.
+Las 40 jornadas con datos de LAE son viejas y nunca se vincularon con la
+tabla de partidos: llegan sin partido_id y sin fecha. Mi clave era
+fecha+nombre, así que no podía casar ni una.
 
-El mercado ya descuenta la mala racha del favorito. Ahí no hay nada.
+Y encima yo había escrito mi propia normalización de nombres. Daba 2 de 8:
 
+    AT.MADRID → aaddimrt  contra  Atlético de Madrid → addimr
 
-POR QUÉ B DABA 0, Y CÓMO SE ARREGLA
+Este proyecto ya resuelve eso todas las semanas en
+mercado/vincular_boleto.py, con tabla de alias, filtro de palabras de
+relleno y un umbral de parecido ya calibrado en 0,72. Ahora se importa de
+ahí en vez de tener dos criterios distintos para lo mismo.
 
-El diagnóstico lo dijo:
+Comprobado, 10 de 10:
 
-    (ejemplo de casilla: probabilidades=['LAE_CIERRE'] mercado=[])
+    AT.MADRID    → atletico madrid   | Atlético de Madrid  1.00
+    ATH.CLUB (F) → ath               | Athletic Club       0.95
+    DEPORTIVO    → deportivo coruna  | RC Deportivo        1.00
+    LOGROÑO (F)  → logrono           | EDF Logroño         0.95
 
-Los porcentajes de LAE están. Lo que falta son las CUOTAS: la captura
-empezó con este proyecto, así que solo existen las de las últimas jornadas.
-
-Comparar al público con el mercado dejaba fuera todo el histórico. Ahora se
-compara con lo que de verdad pasó, que además es mejor pregunta:
-
-    si la gente juega un signo al 60%, debería salir el 60% de las veces
-
-Cuando no sale, ahí está el valor. Y la pregunta es si falla MÁS donde la
-reputación va por delante de la forma.
-
-
-LO QUE VA A IMPRIMIR
-
-    tramo                                 n    juega  ocurre    error
-    brecha baja (reputación ~ forma)   NNNN    xx.x%   xx.x%   -x.x%
-    brecha media-baja                  NNNN    ...
-    brecha media-alta                  NNNN    ...
-    brecha alta (reputación >> forma)  NNNN    ...
-
-    diferencia entre extremos: -x.x%
-    probabilidad de ver esto por azar: 0.xxx
-
-La columna 'error' negativa significa que el público se pasa. Lo que
-buscamos es que sea MÁS negativa en la brecha alta que en la baja. Si es
-igual de negativa en los cuatro tramos, el público se pasa siempre y la
-reputación no explica nada.
-
-Los tramos son cuartiles, no un umbral a mano: un umbral se puede mover
-hasta que salga lo que uno quiere.
-
-El p-valor sale de barajar la brecha 2.000 veces y contar cuántas el azar
-produce una diferencia igual de grande. Probado con datos simulados:
-detecta efectos reales con p entre 0,001 y 0,002, y con efecto cero da
-p > 0,05.
+Y no confunde equipos distintos: AT.MADRID contra Real Madrid da 0,69, por
+debajo del umbral. Además se exige que casen los DOS equipos del partido,
+no uno.
 
 
-MIRA TAMBIÉN ESTA LÍNEA
+LA TEMPORADA ES LO QUE DESAMBIGUA
 
-    NNN casillas que no casan con ningún resultado
+Como no hay fecha, se busca dentro de la temporada de la jornada: ahí un
+enfrentamiento con un local y un visitante concretos ocurre una sola vez.
+No hace falta la fecha del partido.
 
-Los nombres del boleto ('Ath.Club') y los de la tabla de resultados
-('Athletic Club') no siempre coinciden. Si ese número pasa del 20% el
-script avisa, porque entonces estaría midiendo una submuestra sesgada y no
-habría que creerse el resultado.
+
+EL RESULTADO SALE DEL BOLETO
+
+signo_oficial viene en la propia casilla, así que el resultado ya no
+depende de emparejar con la tabla de partidos. Solo la brecha lo necesita.
+
+
+SI VUELVE A FALLAR
+
+Cuando el emparejamiento falla en más del 20%, el script imprime las
+casillas tal como llegan (partido_id, fecha, nombres, normalizado) y cómo
+se llaman los equipos en la tabla de resultados. Una ejecución tarda
+minutos: mejor que diga qué pasa a tener que adivinarlo.
