@@ -1,234 +1,122 @@
-# Quiniela 1X2 - Sistema de Ingesta de Datos
+# Predictor 1X2
 
-Ingestión automatizada de datos para predicción de resultados de la Quiniela 1X2. Recopila datos históricos y actuales de ligas españolas, competiciones complementarias, clima y estadios
+Sistema para pronosticar La Quiniela y proponer un boleto. Captura los datos,
+entrena un modelo, calcula qué signos merecen la pena y publica todo en un
+panel web.
 
-## Arquitectura
+**Qué esperar de esto.** No es un sistema que gane dinero. En el backtest
+sobre 989 jornadas con premios reales, ninguna estrategia dio beneficio con
+significancia estadística; la mejor perdió un 14,4% con un intervalo de
+confianza del 90% entre −40% y +17%. Lo que hace es reducir la pérdida
+esperada frente a jugar al favorito (−44,8%) o a seguir al público (−69,2%).
+Los detalles están en [analisis/HALLAZGOS.md](analisis/HALLAZGOS.md).
 
-```
-┌─────────────────────┐
-│  GitHub Actions     │
-│  Python Ingestors   │
-└──────────┬──────────┘
-           │ HTTP/HTTPS JSON
-           │ X-Ingest-Token (autenticación)
-           ▼
-┌─────────────────────┐
-│  IONOS API PHP      │
-│  /api/ingesta/      │
-│  (20 endpoints)     │
-└──────────┬──────────┘
-           │ PDO local
-           ▼
-┌─────────────────────┐
-│  MariaDB IONOS      │
-│  dbs16085248        │
-│  (47 tablas)        │
-└─────────────────────┘
-```
-
-## Principios Clave
-
-**GitHub NO se conecta directamente a MariaDB.** Esto garantiza:
-- ✅ GitHub Actions no tiene credenciales de base de datos
-- ✅ Seguridad: solo token API en secretos
-- ✅ Escalabilidad: API puede reemplazarse o cacharse
-- ✅ Trazabilidad: todas las peticiones se registran en `bruto_respuestas_api`
-
-## Secretos Requeridos en GitHub Actions
-
-Solo necesitas **dos** variables de entorno:
+## Cómo está montado
 
 ```
-INGEST_API_URL      → https://1x2.juancarlosmallo.com/api/ingesta/
-INGEST_API_TOKEN    → token privado de seguridad
+GitHub Actions  ──HTTP + X-Ingest-Token──▶  API PHP en IONOS  ──PDO──▶  MariaDB
+   (Python)                                  /api/ingesta/              47 tablas
+                                                    │
+                                                    ▼
+                                          Panel web (index.php)
 ```
 
-**NO** guardes en GitHub:
-- `DB_HOST`, `DB_USER`, `DB_PASSWORD`
-- Cadenas de conexión MariaDB
-- Credenciales IONOS
+**GitHub nunca se conecta a MariaDB.** Solo conoce dos secretos,
+`INGEST_API_URL` e `INGEST_API_TOKEN`. Las credenciales de base de datos
+viven únicamente en `_private/config.local.php` del servidor.
 
-## Scripts de Ingesta Activos
+El panel tampoco usa el token: lee la base directamente con `db()`. Si
+llamara a la API por HTTP tendría que llevar el token en el navegador, donde
+cualquiera puede leerlo.
 
-| Script | Propósito | Fuente | Frecuencia | Modo |
-|--------|-----------|--------|-----------|------|
-| `laliga_partidos.py` | Primera/Segunda 2026-27 | laliga.com | Diaria | Incremental |
-| `ligaf_partidos.py` | Liga F 2026-27 | ligaf.es | Diaria | Incremental |
-| `competiciones_masculinas.py` | Copa, Champions, Europa, Conference | OpenFootball, FixtureDownload | Semanal | Update |
-| `competiciones_femeninas.py` | Copa Reina, Supercopa Fem., UWCL | SoccerDonna | Semanal | Update |
-| `clima_open_meteo.py` | Clima actual/futuro | Open-Meteo | Diaria | Overwrite |
-| `plantillas_2026_27.py` | Plantillas de equipos | laliga.com, ligaf.es | Semanal | Overwrite |
-| `estadios_geocodificar.py` | Geocodificación de nuevos estadios | OpenStreetMap Nominatim | On-demand | Idempotente |
+## Los módulos
 
-## Datasets Disponibles
+| Carpeta | Qué hace |
+|---|---|
+| `ingestion/` | Calendarios, clima, estadios y plantillas. El cliente HTTP común (`api_client.py`) |
+| `historico/` | Importa jornadas pasadas desde el buscador oficial de SELAE, con premios reales |
+| `mercado/` | Porcentajes de LAE y cuotas de las casas |
+| `modelado/` | El pronóstico propio: características, Elo y modelo de goles |
+| `optimizador/` | Decide qué marcar en cada casilla y con qué presupuesto |
+| `analisis/` | Backtesting sobre el histórico. **Aquí están los hallazgos que sostienen todo lo demás** |
 
-### Histórico (Completado)
+## De dónde sale cada columna del panel
 
-- **Primera División:** 2022-23 a 2025-26 (380 × 5 = 1,900 partidos)
-- **Segunda División:** 2022-23 a 2025-26 (462 × 5 = 2,310 partidos)
-- **Liga F:** 2022-23 a 2025-26 (480 × 5 = 2,400 partidos femeninos)
-- **Competiciones Complementarias:** Copa, Champions, Europa, Conference (2022-26)
-- **Competiciones Femeninas:** Copa Reina, Supercopa Fem., UWCL (2022-26)
+| Columna | Fuente | Qué significa |
+|---|---|---|
+| **% LAE** | loteriasyapuestas.es | Cuánta gente juega cada signo. Dice qué hace el público, no qué va a pasar |
+| **% Apuestas** | BetFair y Matchbook (LaLiga, Segunda), 1xBet y SportyTrader (Liga F) | Probabilidad implícita en las cuotas, ya sin margen |
+| **% Predictor** | `modelado/pronosticar.py` | Nuestro modelo |
+| **Valor** | Apuestas ÷ LAE | Por encima de 1 el signo está infrajugado y paga más de lo que le toca |
 
-### Actual (2026-27 - Incremental)
+El **valor** es la idea central. El premio se reparte entre acertantes, así
+que un signo que acierta poca gente paga más. Medido sobre el histórico: la
+columna menos jugada pagó una mediana de 5,00 EUR y la más jugada 1,10 EUR,
+un factor de 4,5.
 
-- **Primera División:** Actualización diaria de jornadas
-- **Segunda División:** Actualización diaria de jornadas
-- **Liga F:** Actualización diaria de jornadas
-- **Competiciones:** Actualización según se jueguen
+## Qué tan bueno es el modelo
 
-### Complementarios
+Medido sobre partidos posteriores a los de entrenamiento, nunca al azar:
 
-- **Plantillas:** 50+ equipos del universo seguido (2026-27)
-- **Estadios:** 150+ estadios con geocodificación (latitud/longitud)
-- **Clima:** 
-  - Observaciones reales (después de partidos)
-  - Previsiones T-24h (24 horas antes)
-  - Previsiones T-72h (72 horas antes)
-  - Fuente: Open-Meteo API
+| Competición | Acierto | Mejora sobre el baseline |
+|---|---|---|
+| Liga F | 62,5% | +0,2344 |
+| LaLiga | 51,4% | +0,0514 |
+| Segunda División | 47,1% | +0,0030 |
 
-## Flujo de Datos Típico
+El pronóstico solo se publica donde no empeora al baseline. En Liga F es la
+única señal disponible, porque ninguna casa grande la cotizaba hasta que se
+añadió 1xBet. En Segunda apenas aporta: es la liga más igualada que existe.
 
-### Ejemplo: Ingesta diaria Primera División
+Para el Pleno al 15 hay un modelo aparte, de goles por equipo (0/1/2/M):
+acierta la categoría de un equipo el 37,2% de las veces, con una mejora de
++0,0470 sobre el baseline.
 
-```
-1. GitHub Action (actualizar_laliga.yml) dispara
-2. Python script: laliga_partidos.py
-   • Descarga datos de laliga.com
-   • Parsea HTML/JSON
-   • Valida volumen (380 partidos)
-   • Abre lote en IONOS API
-3. API IONOS (guardar_partido.php)
-   • Valida estructura
-   • Crea/actualiza equipos si es necesario
-   • Guarda en nucleo_partidos
-   • Guarda RAW en bruto_respuestas_api
-4. MariaDB actualiza estado
-   • PROGRAMADO → FINALIZADO cuando se juega
-   • Mantiene idempotencia para reruns
-```
+## Datos
 
-## Reglas Anti Data-Leakage
+| | |
+|---|---|
+| Partidos con resultado | **4.402** — Segunda 1.882, LaLiga 1.552, Liga F 968 |
+| Temporadas completas | 2022-23 a 2025-26, más la actual |
+| Jornadas de quiniela | **686** desde 2016-17, con premios oficiales de SELAE |
 
-Para predicción point-in-time correcta:
+## La regla que no se puede romper
 
-- ✅ Usar `available_at` / `known_at` para verificar qué se sabía antes del partido
-- ✅ Previsiones meteorológicas: T-24h y T-72h (no usar observación real como si fuera previsión)
-- ✅ Handicap histórico: datos disponibles ANTES del partido, no después
-- ✅ Clasificación: snapshot del momento del partido, no clasificación final
-- ✅ Lesiones: información publicada antes, no confirmada después
+Cada partido se describe **solo con lo anterior a él**. El estado de los
+equipos se actualiza después de generar sus características, nunca antes. Y
+los datos que cambian durante la semana —los porcentajes de LAE, las
+cuotas— se guardan con su franja temporal (`T-72`, `T-24`, `T-2`, `CIERRE`),
+para que al entrenar se use lo que estaba disponible antes de decidir y no
+lo definitivo.
 
-## Endpoints PHP Principales
+Saltarse esto da un modelo que parece excelente en las pruebas y fracasa en
+cuanto se usa: en este proyecto ya ocurrió tres veces, y está documentado en
+`analisis/HALLAZGOS.md` para no repetirlo.
 
-Alojados en `/api/ingesta/`:
+## Los workflows
 
-| Endpoint | Método | Propósito |
-|----------|--------|-----------|
-| `bootstrap.php` | GET | Verificar BD y versión |
-| `health.php` | GET | Health check |
-| `iniciar_lote.php` | POST | Abrir lote de ingesta |
-| `finalizar_lote.php` | POST | Cerrar lote |
-| `contexto_partidos.php` | GET | Estado de partidos a cargar |
-| `guardar_partido.php` | POST | Guardar partido (liga) |
-| `guardar_partido_complementario.php` | POST | Guardar partido (copa/UEFA) |
-| `guardar_clima.php` | POST | Guardar clima actual |
-| `guardar_clima_historico.php` | POST | Guardar previsión histórica |
-| `guardar_estadio.php` | POST | Guardar estadio con coordenadas |
-| `guardar_plantilla.php` | POST | Guardar plantilla de equipo |
-| `guardar_documento.php` | POST | Guardar documento RAW |
+Están explicados uno a uno en [WORKFLOWS.md](WORKFLOWS.md), con el orden en
+que deben correr y una tabla de «si esto falta en el panel, lanza esto».
 
-## Tabla de Datos Central
-
-`nucleo_partidos` es la tabla más referenciada por foreign keys (47 tablas referencian su `partido_id`). Campos principales:
+## Secretos
 
 ```
-partido_id              [PK]
-temporada_competicion_id [FK → nucleo_temporadas_competicion]
-equipo_local_id         [FK → nucleo_equipos]
-equipo_visitante_id     [FK → nucleo_equipos]
-estadio_id              [FK → nucleo_estadios]
-fecha_hora_inicio       [Hora local de Madrid]
-zona_horaria            ['Europe/Madrid']
-estado                  ['PROGRAMADO', 'FINALIZADO', 'APLAZADO', 'SUSPENDIDO', ...]
-goles_local / goles_visitante
-hubo_prorroga / hubo_penaltis
-arbitro_id
+INGEST_API_URL      https://1x2.juancarlosmallo.com/api/ingesta/
+INGEST_API_TOKEN    el token privado
+ODDS_API_KEY        para The Odds API (cuotas de LaLiga y Segunda)
 ```
 
-## Validación y Métricas
+Nunca en el repositorio: credenciales de MariaDB, cadenas de conexión ni
+nada de IONOS.
 
-### Conteos Validados (Estado 03/09/2026)
+## Lo que falta
 
-- ✅ Primera 2022-26: 1,900 partidos
-- ✅ Segunda 2022-26: 2,310 partidos
-- ✅ Liga F 2022-26: 2,400 partidos
-- ✅ Copa Masculina 2022-26: 420+ partidos
-- ✅ Champions 2022-26: 150+ partidos
-- ✅ UWCL 2022-26: 110+ partidos
-- ✅ Clima histórico: 235/237 partidos (2 con temperatura NULL documentado)
-
-### Política de Reruns
-
-- ✅ Idempotente: ejecutar múltiples veces produce el mismo resultado
-- ✅ PROGRAMADO → FINALIZADO es seguro
-- ⚠️ FINALIZADO → PROGRAMADO NUNCA (degradación de datos)
-- ✅ Guardado incremental: no sobrescribe datos existentes sin validación
-
-## Troubleshooting
-
-### GitHub Actions falla con "API IONOS HTTP 502"
-
-Reintentará automáticamente (3 intentos con backoff exponencial).
-
-### Clima histórico incompleto
-
-Ejecutar:
-```bash
-python3 ingestion/clima_historico.py
-```
-
-Repite automáticamente hasta que `contexto_clima_historico.php` retorne `pendiente = 0`.
-
-### Duplicados en competiciones complementarias
-
-Ejecutar validación (SQL en documentación):
-```sql
-SELECT COUNT(*) FROM nucleo_partidos WHERE [...] GROUP BY [...]
-```
-
-Compararar con conteos esperados (tabla de validación arriba).
-
-## Próximos Pasos (Roadmap)
-
-### ✅ Completado
-- Ingesta histórica de todas las ligas
-- Ingesta actual 2026-27 (incremental)
-- Clima (actual, histórico con pequeña brecha)
-- Plantillas, estadios
-
-### 🚧 En Desarrollo
-- Clima histórico: 2 partidos con temperatura NULL (registrado, no error)
-- Schema ENGINE/CHARSET: consistencia
-- `.gitignore` y documentación
-
-### 📋 Próximo: Features & Modelo
-- Ingeniería de features (Elo, forma, descanso, carga)
-- Materialización en `analitica_contexto_partido`
-- Modelo predictivo 1-X-2
-- Backtesting point-in-time
-
-## Contribuir
-
-1. **Crear rama** para cambios
-2. **Ejecutar localmente** con `INGEST_API_URL` de testing si es necesario
-3. **Validar volumen** antes de hacer POST a API
-4. **Mantener idempotencia** en todos los scripts
-5. **Documentar** cambios en data leakage o estructura
-
-## Licencia
-
-Privado - Proyecto Juan Carlos Mallo
-
-## Contacto
-
-Para preguntas sobre arquitectura, ingesta o datos: Consultar documentación del proyecto (HANDOFF_*.md)
+- **Medir jornadas reales.** El backtest da un intervalo tan ancho que no
+  distingue perder un 15% de ganar un 10%. Solo acumular jornadas decididas
+  antes de conocer el resultado lo estrechará.
+- **Rehacer el backtest sobre datos de SELAE.** Las cifras de HALLAZGOS.md
+  salen de Quinielandia; ahora hay 686 jornadas con premios oficiales.
+- **Valoración de los jugadores.** Hay 1.378 en la base pero ningún endpoint
+  que los lea, así que no se sabe si el valor de mercado está guardado.
+- **Prensa y alineaciones.** Su utilidad es dudosa donde el mercado ya está
+  calibrado; tendría sentido en Liga F, que nadie cotiza con detalle.
