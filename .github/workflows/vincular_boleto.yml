@@ -1,0 +1,68 @@
+name: Vincular boleto con los partidos
+
+# Une cada casilla del boleto con su partido en nucleo_partidos.
+#
+# Sin ese vínculo la casilla no tiene ni horario ni cuotas: el boleto trae
+# los nombres como los imprime SELAE ("GETAFE", "R.SOCIEDAD B") y hay que
+# emparejarlos con los de la base.
+#
+# Conviene lanzarlo DESPUÉS de cargar el calendario, no antes: en la jornada
+# 4 la casilla 15 (Getafe - Celta) se quedó sin vincular porque ese partido
+# todavía no estaba en la base cuando se ejecutó el vinculador, y por eso el
+# panel no mostraba su hora.
+
+on:
+  schedule:
+    # Miércoles y viernes por la mañana, antes de capturar cuotas.
+    - cron: "40 8 * * 3,5"
+  workflow_dispatch:
+    inputs:
+      temporada:
+        description: "Temporada (vacío = la más reciente)"
+        required: false
+        type: string
+      jornada:
+        description: "Número de jornada (vacío = la más reciente)"
+        required: false
+        type: string
+      dry_run:
+        description: "Simular sin escribir en la base de datos"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  vincular:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v7
+
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Probar puente IONOS
+        working-directory: ingestion
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: python probar_api.py
+
+      - name: Vincular
+        working-directory: mercado
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.temporada }}" ]; then ARGS="$ARGS --temporada ${{ inputs.temporada }}"; fi
+          if [ -n "${{ inputs.jornada }}" ]; then ARGS="$ARGS --jornada ${{ inputs.jornada }}"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python vincular_boleto.py $ARGS
