@@ -243,34 +243,52 @@ def leer_1x2(texto: str) -> dict | None:
 
     La mediana y no la mejor cuota: la mejor la pone la casa más agresiva o
     la que se ha equivocado, y aquí interesa el consenso del mercado.
+
+    El bloque tiene esta forma, una fila por casa:
+
+        Full Time Result
+        Bookmaker / 1 / X / 2 / Bonus up to     <- cabecera
+        40 / 10 / 1.02                          <- una casa
+        65 / 21 / 1.02                          <- otra
+        ...
+
+    Se empieza a leer DESPUÉS de "Bonus up to" porque el "1" y el "2" de la
+    cabecera son números y se colarían como si fueran cuotas.
     """
     bloque = _bloque(texto, "Full Time Result", ["Half Time Result", "Under/Over"])
     if not bloque:
         return None
 
-    # Cada casa ocupa una fila: las tres cuotas y, detrás, el bono. Anclar
-    # al bono es lo que distingue una cuota de un importe: sin ese ancla, un
-    # "Bonus up to €1000" se colaba como si fuera una cuota de 1000.
-    filas = [
-        (float(m.group(1)), float(m.group(2)), float(m.group(3)))
-        for m in re.finditer(
-            r"(\d{1,3}(?:\.\d{1,2})?)\s*\n\s*(\d{1,3}(?:\.\d{1,2})?)\s*\n\s*"
-            r"(\d{1,3}(?:\.\d{1,2})?)\s*\n\s*(?:[€$£]|See the offer|Bonus)",
-            bloque,
-        )
-    ]
-    # Una cuota nunca baja de 1,01. Si alguna lo hace, la fila no era una fila.
-    filas = [f for f in filas if all(1.01 <= c <= 1000 for c in f)]
-    if len(filas) < 3:
+    # Todo lo anterior a la cabecera es rótulo, no dato.
+    corte = bloque.find("Bonus up to")
+    if corte < 0:
+        corte = bloque.find("BONUS UP TO")
+    if corte >= 0:
+        bloque = bloque[corte + len("Bonus up to"):]
+
+    nums = _numeros(bloque)
+    filas = [tuple(nums[i:i + 3]) for i in range(0, len(nums) - 2, 3)]
+    filas = [f for f in filas if len(f) == 3]
+
+    # Cada fila tiene que ser un mercado coherente: sus inversos suman algo
+    # por encima de 1 (el margen de la casa) y no disparatado. Así se cae
+    # sola cualquier fila mal alineada.
+    validas = []
+    for c1, cx, c2 in filas:
+        if min(c1, cx, c2) < 1.01 or max(c1, cx, c2) > 1000:
+            continue
+        m = 1 / c1 + 1 / cx + 1 / c2 - 1
+        if 0.0 <= m <= 0.30:
+            validas.append((c1, cx, c2))
+
+    if len(validas) < 3:
         return None
 
-    c1 = statistics.median(f[0] for f in filas)
-    cx = statistics.median(f[1] for f in filas)
-    c2 = statistics.median(f[2] for f in filas)
+    c1 = statistics.median(f[0] for f in validas)
+    cx = statistics.median(f[1] for f in validas)
+    c2 = statistics.median(f[2] for f in validas)
 
-    inv = [1 / c1, 1 / cx, 1 / c2]
-    suma = sum(inv)
-    margen = suma - 1
+    margen = 1 / c1 + 1 / cx + 1 / c2 - 1
     if not (MARGEN_MINIMO <= margen <= 0.25):
         return None
 
@@ -278,7 +296,7 @@ def leer_1x2(texto: str) -> dict | None:
         "cuota_local": round(c1, 3),
         "cuota_empate": round(cx, 3),
         "cuota_visitante": round(c2, 3),
-        "casas": len(filas),
+        "casas": len(validas),
         "margen": round(margen, 4),
     }
 
@@ -292,7 +310,11 @@ def leer_pleno(texto: str) -> dict | None:
     el 0-0 es el que más falta— y entonces se devuelve None: un Pleno mal
     calculado es peor que ninguno.
     """
-    bloque = _bloque(texto, "Correct Score", ["On ", "Bookmaker review", "FAQ"])
+    # No se corta por "On ": esa palabra puede aparecer dentro del bloque y
+    # dejaría fuera marcadores, que es justo lo que hay que evitar. Cortar de
+    # más es inofensivo (el texto sobrante no tiene marcadores) y cortar de
+    # menos sesga la distribución.
+    bloque = _bloque(texto, "Correct Score", ["Bookmaker review", "FAQ"])[:20000]
     if not bloque:
         return None
 
