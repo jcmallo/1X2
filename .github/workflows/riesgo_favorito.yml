@@ -30,9 +30,9 @@ on:
   workflow_dispatch:
     inputs:
       jornadas:
-        description: "Cuántas jornadas mirar hacia atrás (máximo 50)"
+        description: "Cuántas jornadas mirar (0 = todas)"
         required: false
-        default: "50"
+        default: "0"
         type: string
 
 jobs:
@@ -65,4 +65,4 @@ jobs:
         env:
           INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
           INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
-        run: python -m analisis.riesgo_favorito --jornadas ${{ inputs.jornadas || '50' }}
+        run: python -m analisis.riesgo_favorito --jornadas ${{ inputs.jornadas || '0' }}
