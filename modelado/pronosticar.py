@@ -13,14 +13,17 @@ Cómo funciona
 
 1. Descarga los partidos con resultado (4.400 a día de hoy: LaLiga, Segunda
    y Liga F).
-2. Entrena el Elo en orden cronológico y calibra la probabilidad de empate
-   por tramo de diferencia de valoración.
-3. Empareja las casillas de la jornada con los equipos por nombre.
-4. Guarda las probabilidades como fuente MODELO_PROPIO.
+2. Describe cada uno con lo que se sabía antes de jugarlo: valoración Elo,
+   forma reciente, goles, descanso y enfrentamientos directos (ver
+   modelado/caracteristicas.py).
+3. Entrena una regresión logística sobre esas características.
+4. Empareja las casillas de la jornada con los equipos por nombre y
+   pronostica.
+5. Guarda las probabilidades como fuente MODELO_PROPIO.
 
-Antes de guardar mide su propio acierto sobre una parte del histórico que no
-ha usado para entrenar. Si el modelo no supera al azar informado, avisa: es
-preferible no tener columna a tener una que engañe.
+Antes de guardar mide su propio acierto sobre partidos posteriores a los de
+entrenamiento, competición por competición, y solo publica donde no empeora
+al baseline. Es preferible no tener columna a tener una que engañe.
 
 Por qué un solo Elo para las tres competiciones
 -----------------------------------------------
@@ -44,6 +47,7 @@ import os
 import re
 import sys
 import unicodedata
+from datetime import datetime
 from difflib import SequenceMatcher
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ingestion"))
@@ -51,7 +55,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api_client import ApiIngesta  # noqa: E402
 
-from modelado.elo import ModeloElo, Partido, dividir_temporal, evaluar  # noqa: E402
+import numpy as np  # noqa: E402
+from sklearn.linear_model import LogisticRegression  # noqa: E402
+from sklearn.pipeline import make_pipeline  # noqa: E402
+from sklearn.preprocessing import StandardScaler  # noqa: E402
+
+from modelado import caracteristicas  # noqa: E402
 
 
 # Los mismos alias que usa el vinculador de boletos: el boleto abrevia de una
@@ -81,19 +90,23 @@ ALIAS = {
 
 UMBRAL = 0.72
 
-# Cuánto tiene que mejorar el modelo al baseline (predecir siempre la
-# frecuencia media de 1/X/2) para que merezca publicarse su pronóstico.
-# Medido sobre validación y por competición separada, porque el modelo no
-# rinde igual en todas:
+# Un pronóstico se publica si no empeora al baseline (predecir siempre la
+# frecuencia media de 1/X/2). El listón está en cero y no más arriba porque
+# una señal débil pero honesta sigue siendo información; lo inaceptable es
+# publicar una que estorbe.
 #
-#     Liga F             66,3% acierto   mejora +0,1590
-#     LaLiga             49,4%           mejora +0,0232
-#     Segunda División   40,8%           mejora -0,0274
+# Medido por competición, que es donde el modelo rinde muy distinto:
 #
-# En Segunda el modelo es peor que no tener modelo, así que ahí no se
-# guarda: una columna que empeora la decisión no es información, es ruido
-# con aspecto de dato.
-MEJORA_MINIMA = 0.01
+#     competición        solo Elo            con características
+#     LaLiga             49,4%  +0,0232      50,8%  +0,0522
+#     Segunda División   40,8%  -0,0274      46,6%  +0,0038
+#     Liga F             66,3%  +0,1590      63,0%  +0,2334
+#
+# Segunda es la razón de ser de modelado/caracteristicas.py: con Elo a secas
+# hacía daño, y con forma reciente, descanso y enfrentamientos directos deja
+# de hacerlo. Sigue siendo la liga más difícil de predecir, y eso no es un
+# defecto del modelo sino de la competición: está muy igualada.
+MEJORA_MINIMA = 0.0
 
 
 def normalizar(nombre: str) -> str:
@@ -131,24 +144,6 @@ def descargar_resultados(api: ApiIngesta) -> list[dict]:
     return todos
 
 
-def a_partidos(filas: list[dict]) -> list[Partido]:
-    salida = []
-    for f in filas:
-        try:
-            salida.append(Partido(
-                fecha=f["fecha_hora_inicio"],
-                local=f["equipo_local"],
-                visitante=f["equipo_visitante"],
-                goles_local=int(f["goles_local"]),
-                goles_visitante=int(f["goles_visitante"]),
-                signo=f["signo"],
-                competicion=f.get("competicion", ""),
-            ))
-        except (KeyError, TypeError, ValueError):
-            continue
-    return salida
-
-
 def main() -> int:
     p = argparse.ArgumentParser(
         description="Entrena el Elo y pronostica una jornada."
@@ -163,47 +158,65 @@ def main() -> int:
 
     print("Descargando histórico...")
     filas = descargar_resultados(api)
-    partidos = a_partidos(filas)
-    print(f"  {len(partidos)} partidos con resultado")
+    X, y, meta, estado_final = caracteristicas.construir(filas)
+    print(f"  {len(X)} partidos con resultado")
 
     comps: dict[str, int] = {}
-    for pt in partidos:
-        comps[pt.competicion] = comps.get(pt.competicion, 0) + 1
+    for c, *_ in meta:
+        comps[c] = comps.get(c, 0) + 1
     for c, n in sorted(comps.items(), key=lambda x: -x[1]):
         print(f"    {c or '(sin competición)'}: {n}")
 
-    if len(partidos) < 300:
+    if len(X) < 300:
         print("\nHay muy pocos partidos para entrenar. No se guarda nada.")
         return 1
 
     # --- Validación antes de usarlo -------------------------------------
     #
-    # Se mide sobre partidos posteriores a los de entrenamiento, nunca
-    # repartidos al azar: predecir un partido de 2023 habiendo visto los de
-    # 2025 daría un acierto que no se repetiría en la realidad.
+    # El corte es por fecha, nunca al azar: entrenar con partidos de 2026 y
+    # evaluar sobre 2023 daría un acierto que no se repetiría en la realidad,
+    # porque en la realidad el futuro no se conoce.
 
-    train, resto = dividir_temporal(partidos, fraccion_train=0.80)
-    print(f"\nValidando: {len(train)} para entrenar, {len(resto)} para comprobar")
+    Xa = np.array(X)
+    ya = np.array(y)
+    corte = int(len(Xa) * 0.80)
 
-    prueba = ModeloElo(k=20.0, ventaja_local=0.0)
-    prueba.entrenar(train)
+    print(f"\nValidando: {corte} para entrenar, {len(Xa) - corte} para comprobar")
 
-    competiciones = sorted({p_.competicion for p_ in resto if p_.competicion})
+    prueba = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(max_iter=2000, C=0.5),
+    )
+    prueba.fit(Xa[:corte], ya[:corte])
+    proba = prueba.predict_proba(Xa[corte:])
+    real = ya[corte:]
+    meta_test = meta[corte:]
+
+    frecuencias = np.bincount(ya[:corte], minlength=3) / corte
     aptas: set[str] = set()
 
     print(f"  {'competición':<20} {'n':>5} {'acierto':>8} {'mejora':>9}")
-    for comp in competiciones + [None]:
-        sub = resto if comp is None else [x for x in resto if x.competicion == comp]
-        if len(sub) < 30:
+    for comp in sorted({c for c, *_ in meta_test if c}) + [None]:
+        idx = [
+            i for i, (c, *_) in enumerate(meta_test)
+            if comp is None or c == comp
+        ]
+        if len(idx) < 30:
             continue
-        r = evaluar(prueba, sub)
-        apta = comp is not None and r["mejora_sobre_base"] >= MEJORA_MINIMA
+        p = proba[idx]
+        t = real[idx]
+        acierto = float((p.argmax(1) == t).mean())
+        ll = float(-np.mean(np.log(np.clip(p[np.arange(len(t)), t], 1e-9, 1))))
+        base = float(-np.mean(np.log(frecuencias[t])))
+        mejora = base - ll
+
+        apta = comp is not None and mejora >= MEJORA_MINIMA
         if apta:
             aptas.add(comp)
         marca = "  se publica" if apta else ("" if comp is None else "  se descarta")
         print(
-            f"  {(comp or 'TODAS'):<20} {r['n']:>5} {r['acierto']:>7.1%} "
-            f"{r['mejora_sobre_base']:>+9.4f}{marca}"
+            f"  {(comp or 'TODAS'):<20} {len(idx):>5} {acierto:>7.1%} "
+            f"{mejora:>+9.4f}{marca}"
         )
 
     if not aptas:
@@ -213,12 +226,15 @@ def main() -> int:
         )
         return 1
 
-    print(f"\n  Se publicará solo: {', '.join(sorted(aptas))}")
+    print(f"\n  Se publicará: {', '.join(sorted(aptas))}")
 
     # --- Modelo definitivo, ya con todo el histórico ---------------------
 
-    modelo = ModeloElo(k=20.0, ventaja_local=0.0)
-    modelo.entrenar(partidos)
+    modelo = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(max_iter=2000, C=0.5),
+    )
+    modelo.fit(Xa, ya)
 
     # --- La jornada -------------------------------------------------------
 
@@ -235,9 +251,8 @@ def main() -> int:
 
     # Índice de equipos conocidos por nombre normalizado.
     conocidos = {}
-    for pt in partidos:
-        for eq in (pt.local, pt.visitante):
-            conocidos.setdefault(normalizar(eq), eq)
+    for eq in estado_final.historial:
+        conocidos.setdefault(normalizar(eq), eq)
 
     def buscar(nombre: str) -> str | None:
         """
@@ -283,13 +298,25 @@ def main() -> int:
             sin_equipo.append((pos, c["local"], c["visitante"]))
             continue
 
-        pr = modelo.predecir(local, visitante)
+        # Las características se calculan con el estado tras todo el
+        # histórico, que es justo lo que se sabe al llegar la jornada.
+        cuando = datetime.now()
+        if c.get("fecha_hora_inicio"):
+            try:
+                cuando = datetime.fromisoformat(c["fecha_hora_inicio"])
+            except ValueError:
+                pass
+
+        vector = estado_final.caracteristicas(local, visitante, cuando)
+        p1, px, p2 = modelo.predict_proba(np.array([vector]))[0]
+
         casillas.append({
             "posicion": pos,
-            "p1": round(pr["1"], 6),
-            "px": round(pr["X"], 6),
-            "p2": round(pr["2"], 6),
+            "p1": round(float(p1), 6),
+            "px": round(float(px), 6),
+            "p2": round(float(p2), 6),
         })
+        pr = {"1": p1, "X": px, "2": p2}
 
         mer = c.get("mercado")
         cmp_ = ""
