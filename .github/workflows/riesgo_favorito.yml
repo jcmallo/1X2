@@ -1,0 +1,68 @@
+name: Riesgo del favorito
+
+# ¿Sirve de algo la brecha entre reputación y forma?
+#
+#     brecha = diferencia de Elo − diferencia de forma
+#
+# Grande y positiva significa "el historial dice que el local es muy
+# superior, pero los resultados recientes no lo dicen". Villarreal-Depor en
+# la jornada 4 de 2026-27, con el Villarreal a 2 puntos de 9 y el Depor
+# invicto, mientras el modelo daba un 61% al local.
+#
+# Se pregunta por dos cosas distintas:
+#
+#   A. ¿Predice mejor el resultado? Probablemente no: el mercado ya sabe que
+#      el favorito viene mal, y eso está en su precio.
+#
+#   B. ¿Predice que el público sobrejuegue al favorito? Esta es la buena. El
+#      público actualiza reputaciones más despacio que el mercado, y como el
+#      valor es mercado ÷ público, predecir el error del público es predecir
+#      el valor.
+#
+# NO TOCA NADA. Solo lee y escribe por pantalla. Si las correlaciones no
+# están, la idea se descarta sin haber cambiado una línea del modelo.
+#
+# Es probable que la parte B diga que no hay datos suficientes: la captura
+# de porcentajes de LAE empezó con este proyecto. En ese caso el propio
+# informe dice cuántas casillas hay y se puede repetir dentro de unos meses.
+
+on:
+  workflow_dispatch:
+    inputs:
+      jornadas:
+        description: "Cuántas jornadas mirar hacia atrás (máximo 50)"
+        required: false
+        default: "50"
+        type: string
+
+jobs:
+  medir:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v7
+
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Probar puente IONOS
+        working-directory: ingestion
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: python probar_api.py
+
+      # Sin working-directory: el script importa los paquetes `ingestion` y
+      # `modelado`, así que se ejecuta desde la raíz con -m.
+      - name: Medir
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: python -m analisis.riesgo_favorito --jornadas ${{ inputs.jornadas || '50' }}
