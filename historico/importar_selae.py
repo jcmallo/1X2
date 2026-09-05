@@ -35,6 +35,7 @@ import argparse
 import os
 import re
 import sys
+import time
 from datetime import date, datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ingestion"))
@@ -63,6 +64,11 @@ CLAVES_PLENO = {
     "local": ("valor0l", "valor1l", "valor2l", "valorml"),
     "visitante": ("valor0v", "valor1v", "valor2v", "valormv"),
 }
+
+# Segundos de espera entre jornadas. Importar el histórico completo son unas
+# 1.100 jornadas y dos peticiones por cada una; ir sin pausa es la forma más
+# rápida de que SELAE empiece a devolver 403.
+PAUSA = 0.4
 
 
 def pedir(url: str, params: dict) -> object:
@@ -199,7 +205,14 @@ def a_float(v) -> float | None:
 
 
 def escrutinio_de(sorteo: dict) -> dict:
-    """Recaudación, apuestas y la categoría de 14 aciertos."""
+    """
+    Recaudación, apuestas, precio y la categoría de 14 aciertos.
+
+    El precio de la apuesta NO se da por sabido: se deriva de recaudación
+    entre apuestas. Ha cambiado con los años —0,50 EUR hasta mediados de los
+    2010 y 0,75 después— y fijarlo en 0,75 falsearía el ROI de media década
+    de histórico en un 50%.
+    """
     cat14 = {}
     for e in sorteo.get("escrutinio", []):
         if e.get("categoria") == 2:      # 1ª categoría = 14 aciertos
@@ -209,17 +222,27 @@ def escrutinio_de(sorteo: dict) -> dict:
     recaudacion = a_float(sorteo.get("recaudacion"))
     apuestas = a_float(sorteo.get("apuestas"))
 
-    # La recaudación llega en céntimos: 258.585.375 con 3,4 millones de
-    # apuestas a 0,75 EUR daría 75 EUR por apuesta, que no tiene sentido.
+    # La recaudación llega en céntimos: 114.980.550 con 1,53 millones de
+    # apuestas daría 75 EUR por apuesta, que no tiene sentido.
     if recaudacion and apuestas and recaudacion / apuestas > 10:
         recaudacion = recaudacion / 100
+
+    precio = None
+    if recaudacion and apuestas:
+        crudo = recaudacion / apuestas
+        # Se redondea al céntimo y se comprueba que salga un precio real: si
+        # no, es que uno de los dos números no es lo que parece y vale más
+        # dejarlo en nulo que meter un precio inventado.
+        redondeado = round(crudo, 2)
+        if 0.10 <= redondeado <= 5.00:
+            precio = redondeado
 
     return {
         "recaudacion": recaudacion,
         "apuestas_validadas": int(apuestas) if apuestas else None,
         "acertantes_14": int(a_float(cat14.get("ganadores")) or 0) if cat14 else None,
         "premio_14": a_float(cat14.get("premio")) if cat14 else None,
-        "precio_apuesta": 0.75,
+        "precio_apuesta": precio,
     }
 
 
@@ -260,17 +283,31 @@ def main() -> int:
         print("SELAE no ha devuelto ningún sorteo en ese rango.")
         return 1
 
-    print(f"  {len(sorteos)} sorteos\n")
+    print(f"  {len(sorteos)} sorteos")
+    if len(sorteos) > 60:
+        minutos = len(sorteos) * (PAUSA + 1.6) / 60
+        print(
+            f"  A este ritmo son unos {minutos:.0f} minutos. Si prefieres "
+            "trocearlo, usa rangos de fechas de una temporada."
+        )
+    print()
 
     api = ApiIngesta()
     importadas = 0
+    sin_jornada = 0
+    sin_precio = []
 
-    for s in sorted(sorteos, key=lambda x: x.get("fecha_sorteo", "")):
+    for indice, s in enumerate(sorted(sorteos, key=lambda x: x.get("fecha_sorteo", "")), 1):
+        if indice > 1:
+            time.sleep(PAUSA)
         temporada = etiqueta_temporada(str(s.get("temporada", "")))
         try:
             jornada = int(s.get("jornada"))
         except (TypeError, ValueError):
-            print(f"  sorteo sin número de jornada, se salta: {s.get('fecha_sorteo')}")
+            # Los sorteos anteriores a 2008 no traen número de jornada ni
+            # número de apuestas, así que no se pueden identificar ni
+            # normalizar. Se cuentan y se informa al final.
+            sin_jornada += 1
             continue
 
         partidos = s.get("partidos", [])
@@ -319,15 +356,20 @@ def main() -> int:
             payload["pleno15"] = pleno
 
         esc = payload["escrutinio"]
+        if esc["precio_apuesta"] is None:
+            sin_precio.append(f"{temporada}/J{jornada}")
         print(
-            f"  jornada {jornada:>2} · {temporada} · {payload['fecha_sorteo']}  "
+            f"  [{indice:>4}/{len(sorteos)}] "
+            f"jornada {jornada:>2} · {temporada} · {payload['fecha_sorteo']}  "
             f"{len(casillas)} casillas, {sum(1 for c in casillas if 'signo_oficial' in c)} signos, "
             f"{len(ternas)} con % LAE, pleno {'sí' if pleno else 'no'}"
         )
         if esc.get("premio_14"):
+            precio = esc["precio_apuesta"]
             print(
                 f"      14 aciertos: {esc['acertantes_14']} acertantes, "
                 f"{esc['premio_14']:,.2f} EUR cada uno".replace(",", ".")
+                + (f" · apuesta a {precio:.2f} EUR" if precio else " · precio desconocido")
             )
 
         if args.dry_run:
@@ -339,6 +381,19 @@ def main() -> int:
             importadas += 1
         except Exception as exc:  # noqa: BLE001
             print(f"      ERROR al guardar: {exc}")
+
+    if sin_jornada:
+        print(
+            f"\n{sin_jornada} sorteos sin número de jornada, omitidos. Son "
+            "anteriores a 2008: SELAE no da ni la jornada ni el número de "
+            "apuestas de esos años, así que no se pueden identificar ni usar "
+            "para calcular rentabilidad."
+        )
+    if sin_precio:
+        print(
+            f"\n{len(sin_precio)} jornadas sin precio de apuesta derivable: "
+            + ", ".join(sin_precio[:8]) + ("..." if len(sin_precio) > 8 else "")
+        )
 
     if args.dry_run:
         print("\nDRY RUN: no se ha guardado nada.")
