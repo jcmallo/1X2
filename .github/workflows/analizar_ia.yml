@@ -1,0 +1,88 @@
+name: Analizar jornada con IA
+
+# La capa que lee lo que los números no ven: bajas, alineaciones probables,
+# el tiempo que hará en cada campo, la situación de cada equipo.
+#
+# El modelo estadístico calcula probabilidades a partir de resultados y lo
+# hace bien. Lo que no puede es leer la prensa. Este workflow le pasa a
+# Claude todo lo que el sistema sabe, le deja buscar el contexto que falta y
+# le pide ajustes justificados uno a uno.
+#
+# Cuesta unos 0,17 EUR por ejecución. El boleto de una jornada cuesta 6 EUR.
+#
+# Va DESPUÉS de proponer el boleto: analiza la propuesta ya calculada en
+# lugar de sustituirla. Y no la modifica: guarda los ajustes sugeridos con su
+# razón, para poder comprobar más adelante si acertaban.
+
+on:
+  schedule:
+    # Sábado 12:45 UTC, después de que la propuesta esté calculada y cerca
+    # del cierre, que es cuando la prensa ya ha publicado las alineaciones.
+    - cron: "45 12 * * 6"
+  workflow_dispatch:
+    inputs:
+      temporada:
+        description: "Temporada (vacío = la más reciente)"
+        required: false
+        type: string
+      jornada:
+        description: "Número de jornada (vacío = la más reciente)"
+        required: false
+        type: string
+      tipo:
+        description: "Franja temporal de la captura"
+        required: false
+        default: "T-24"
+        type: choice
+        options: ["T-72", "T-24", "T-2", "CIERRE"]
+      sin_web:
+        description: "No buscar en internet (más barato, sin bajas ni clima)"
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: "Simular sin escribir en la base de datos"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  analizar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v7
+
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          pip install -r requirements.txt
+          pip install "anthropic>=0.40"
+
+      - name: Probar puente IONOS
+        working-directory: ingestion
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: python probar_api.py
+
+      # Sin working-directory: el script importa el paquete `ia`, así que se
+      # ejecuta desde la raíz del repositorio con -m.
+      - name: Analizar
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          ARGS="--tipo ${{ inputs.tipo || 'T-24' }}"
+          if [ -n "${{ inputs.temporada }}" ]; then ARGS="$ARGS --temporada ${{ inputs.temporada }}"; fi
+          if [ -n "${{ inputs.jornada }}" ]; then ARGS="$ARGS --jornada ${{ inputs.jornada }}"; fi
+          if [ "${{ inputs.sin_web }}" = "true" ]; then ARGS="$ARGS --sin-web"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m ia.analizar $ARGS
