@@ -1,53 +1,21 @@
-GITHUB — sustituye estos cuatro archivos
-========================================
+Sustituye  ia/analizar.py
 
-   ia/analizar.py
-   modelado/pronosticar.py
-   ingestion/api_client.py
-   .github/workflows/analizar_ia.yml
+QUÉ CAMBIA, DESPUÉS DE LA PRIMERA EJECUCIÓN REAL
 
-QUÉ CAMBIA
+1. Presupuesto de búsqueda dicho en voz alta.
+   El modelo se quedó sin búsquedas y dejó cinco casillas sin mirar, entre
+   ellas las tres de Liga F —las de mayor discrepancia y menor cobertura de
+   prensa, o sea justo donde estaba el margen—. No sabía cuánto podía
+   gastar, así que gastó todo en las primeras.
+   Ahora se le dice: 16 búsquedas para N casillas, unas dos por casilla,
+   empezando por la de más discrepancia. Y que Liga F no se deja para el
+   final.
 
-1. La IA ve cómo se movió el precio, no solo su último valor.
-   Antes solo podía preguntarse "¿es importante esta baja?". Ahora puede
-   preguntarse lo que de verdad importa: "¿ya estaba en la cuota?".
+2. La lista de atención se corta en 6.
+   Marcó ocho y no le dio para tantas. Seis a fondo valen más que ocho a
+   medias.
 
-2. Índice de atención.
-   Catorce partidos son demasiados para investigarlos todos, y además
-   investigar donde todos coinciden solo sirve para encontrar historias
-   donde no las hay. Se marcan con * las casillas donde mercado, público y
-   modelo discrepan: ahí es donde alguien sabe algo.
-
-3. Devuelve señales, no porcentajes.
-   Ya no dice "el Atlético baja al 41%", que es intuición disfrazada de
-   número. Dice: titulares_ausentes 2, calidad_sustituto baja,
-   clima_adverso sí. Eso se guarda en la columna senales y con suficientes
-   jornadas se puede medir cuánto vale cada tipo de hecho — y acabar siendo
-   una característica más del modelo estadístico.
-   Incluye las altas, no solo las bajas: si solo buscas lesionados, solo
-   encuentras malas noticias.
-
-4. Cada hecho lleva nivel de fuente (A comunicado oficial → D rumor) y
-   estado respecto al mercado (NOVEDAD / YA_CONOCIDA / DESCONTADA).
-   Una señal DESCONTADA no genera ajuste, pero se guarda igual: sirve para
-   ver después si el mercado reacciona bien a cada tipo de noticia.
-
-5. Segunda opinión.
-   Un segundo modelo intenta tumbar los ajustes del primero: comprueba
-   fechas, si el precio ya se movió, si el sustituto juega habitualmente,
-   si la fuente es un comunicado o un rumor. Los que descarta no se
-   aplican; los que rebaja pierden confianza. Se puede saltar con
-   --sin-revision.
-
-6. pronosticar.py añade Brier, RPS y ECE al informe.
-   El acierto no distingue entre decir 40% y decir 90%, y aquí esa
-   diferencia es todo: el sistema reparte dobles y triples según la
-   probabilidad. Medido en la última ejecución: Brier 0,5862 (baseline
-   0,6371), RPS 0,2059, ECE 0,0206 — justo en el umbral de "bien
-   calibrado". El único tramo torcido es el 70-100%: dice 80,2% y ocurre
-   84,7%, o sea que es conservador con los favoritos claros.
-
-CÓMO PROBARLO
-
-   Actions → "Analizar jornada con IA" → Run workflow
-   marca dry_run para que no escriba nada.
+3. El coste ya cuenta las búsquedas.
+   Se cobran aparte de los tokens que devuelven (0,01 $ cada una). Sin esa
+   línea, la cifra guardada era un 20% menor que la real — y esa cifra es
+   la que decidirá si esta capa compensa.

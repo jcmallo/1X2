@@ -64,6 +64,19 @@ MODELO = "claude-opus-5"
 # atención y hace que el modelo invente contexto donde no lo hay.
 UMBRAL_ATENCION = 0.35
 
+# Cuántas casillas van a la lista de atención como mucho. La primera
+# ejecución marcó ocho, el modelo agotó las búsquedas en la segunda y dejó
+# cinco sin mirar —incluidas las tres de Liga F, que son las de mayor
+# discrepancia y menor cobertura de prensa—. Más vale investigar seis a
+# fondo que ocho a medias.
+MAX_ATENCION = 6
+
+# Búsquedas web permitidas. A unos 8.000 tokens de resultados cada una, es
+# lo que domina la factura: pasar de 10 a 20 no dobla el coste del modelo,
+# pero sí llena el contexto. Dos por casilla marcada, más margen.
+MAX_BUSQUEDAS = 16
+PRECIO_BUSQUEDA = 0.01  # USD por búsqueda, aparte de los tokens
+
 # Precios por millón de tokens, para poder registrar lo que cuesta cada
 # ejecución en lugar de estimarlo.
 PRECIO_ENTRADA = 5.00
@@ -377,6 +390,7 @@ def formatear(datos: dict, movimiento: dict | None = None) -> str:
     # cambio, alguien sabe algo.
     if atencion:
         atencion.sort(reverse=True)
+        del atencion[MAX_ATENCION:]
         lineas += [
             "",
             "",
@@ -384,7 +398,15 @@ def formatear(datos: dict, movimiento: dict | None = None) -> str:
             "",
             "Marcadas con * arriba. En estas casillas las tres fuentes no se",
             "ponen de acuerdo, así que hay algo que los números no explican.",
-            "Busca a fondo en estas; en las demás, solo si te sobra margen.",
+            "",
+            f"Tienes {MAX_BUSQUEDAS} búsquedas en total para {len(atencion)} "
+            "casillas. Repártelas: unas dos por casilla, empezando por la de",
+            "mayor discrepancia. No gastes las primeras a fondo y te quedes",
+            "sin mirar las últimas — quedarse sin cobertura en la casilla de",
+            "más discrepancia es el peor resultado posible.",
+            "",
+            "Liga F es la que menos cobertura tiene y la que más margen deja:",
+            "no la dejes para el final.",
             "",
         ]
         for p, pos, nombre in atencion:
@@ -437,7 +459,7 @@ def analizar(contexto: str, con_web: bool) -> tuple[str, dict, dict]:
         herramientas.append({
             "type": "web_search_20260209",
             "name": "web_search",
-            "max_uses": 10,
+            "max_uses": MAX_BUSQUEDAS,
         })
 
     mensaje = cliente.messages.create(
@@ -484,9 +506,14 @@ def analizar(contexto: str, con_web: bool) -> tuple[str, dict, dict]:
     uso = {
         "tokens_entrada": mensaje.usage.input_tokens,
         "tokens_salida": mensaje.usage.output_tokens,
+        # Las búsquedas se cobran aparte de los tokens que devuelven. Sin
+        # esta línea el coste que se guarda es un 20% menor que el real, y
+        # entonces la decisión de "¿compensa esta capa?" se toma con una
+        # cifra falsa.
         "coste_usd": round(
             mensaje.usage.input_tokens / 1e6 * PRECIO_ENTRADA
-            + mensaje.usage.output_tokens / 1e6 * PRECIO_SALIDA,
+            + mensaje.usage.output_tokens / 1e6 * PRECIO_SALIDA
+            + busquedas * PRECIO_BUSQUEDA,
             5,
         ),
         "busquedas_web": busquedas,
@@ -545,14 +572,15 @@ def revisar(contexto: str, texto: str, ajustes: dict) -> tuple[dict, dict]:
             pass
     veredictos["_texto"] = salida
 
+    busquedas_rev = sum(1 for b in mensaje.content if b.type == "server_tool_use")
     uso = {
         "tokens_entrada": mensaje.usage.input_tokens,
         "tokens_salida": mensaje.usage.output_tokens,
         "coste_usd": round(
             mensaje.usage.input_tokens / 1e6 * PRECIO_ENTRADA
-            + mensaje.usage.output_tokens / 1e6 * PRECIO_SALIDA, 5),
-        "busquedas_web": sum(
-            1 for b in mensaje.content if b.type == "server_tool_use"),
+            + mensaje.usage.output_tokens / 1e6 * PRECIO_SALIDA
+            + busquedas_rev * PRECIO_BUSQUEDA, 5),
+        "busquedas_web": busquedas_rev,
     }
     return veredictos, uso
 
