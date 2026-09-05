@@ -30,11 +30,32 @@ DOS PREGUNTAS DISTINTAS
 
     B. ¿Predice el ERROR DEL PÚBLICO?
        Aquí la objeción no aplica. No decimos que el mercado se equivoque:
-       decimos que el público va por detrás del mercado actualizando
-       reputaciones. Y como el valor es mercado ÷ público, predecir el error
-       del público es predecir el valor, que es lo que se cobra.
+       decimos que el público va por detrás actualizando reputaciones. Y
+       como el valor es mercado ÷ público, predecir el error del público es
+       predecir el valor, que es lo que se cobra.
 
-    B es la interesante, y es la que nunca hemos probado.
+RESULTADO DE A, YA MEDIDO: no aporta, y no por falta de muestra. La
+interacción se activa en 962 de 4.407 partidos y aun así empeora el
+log-loss (−0,0005 el producto, −0,0002 la asimétrica). El control —la resta
+elo − forma, que es colineal y no puede aportar nada— dio +0,0001, así que
+el test estaba bien montado. La pregunta A está cerrada en negativo.
+
+CÓMO SE MIDE B SIN CUOTAS
+
+La primera versión comparaba al público con el mercado, y eso dejó fuera
+todo el histórico: la captura de cuotas empezó con este proyecto, así que
+solo existen las de las últimas jornadas. Los porcentajes de LAE, en
+cambio, sí están desde el principio.
+
+Así que se compara al público con lo que de verdad pasó, que además es una
+pregunta mejor: si la gente juega un signo al 60%, ese signo debería salir
+el 60% de las veces. Cuando no sale, ahí está el valor. La pregunta es si
+falla más donde la reputación va por delante de la forma.
+
+Se parte por cuartiles de brecha, no por un umbral elegido a mano —un
+umbral se puede mover hasta que salga lo que uno quiere— y se comprueba con
+una prueba de permutación: se baraja la brecha 2.000 veces y se mira cuántas
+veces el azar produce una diferencia igual de grande.
 
 ESTE SCRIPT NO CAMBIA NADA. Solo mide y escribe. Si las correlaciones no
 están, la idea se cae y no hemos tocado el modelo.
@@ -89,7 +110,7 @@ def clave(fecha: str, local: str, visitante: str) -> str:
     return f"{(fecha or '')[:10]}|{limpio(local)}|{limpio(visitante)}"
 
 
-def brechas(filas: list[dict]) -> dict[str, float]:
+def brechas(filas: list[dict]) -> tuple[dict[str, float], dict[str, str]]:
     """
     La brecha de cada partido, calculada con lo que se sabía ANTES de jugarlo.
 
@@ -113,6 +134,7 @@ def brechas(filas: list[dict]) -> dict[str, float]:
 
     estado = caracteristicas.Estado()
     salida: dict[str, float] = {}
+    signos: dict[str, str] = {}
     i_elo = caracteristicas.NOMBRES.index("elo_diferencia")
     i_forma = caracteristicas.NOMBRES.index("forma_diferencia")
 
@@ -121,10 +143,13 @@ def brechas(filas: list[dict]) -> dict[str, float]:
         # El Elo va dividido por 100 y la forma es una fracción de 0 a 1, así
         # que se ponen en la misma escala antes de restar. Sin esto la brecha
         # sería el Elo con un pellizco de forma.
-        salida[clave(dt.isoformat(), loc, vis)] = float(v[i_elo]) - float(v[i_forma])
+        k = clave(dt.isoformat(), loc, vis)
+        salida[k] = float(v[i_elo]) - float(v[i_forma])
+        if signo:
+            signos[k] = signo
         estado.registrar(loc, vis, dt, gl, gv)
 
-    return salida
+    return salida, signos
 
 
 def terna(d: dict | None, a: str, b: str, c: str) -> list[float] | None:
@@ -178,8 +203,8 @@ def main() -> int:
     print(f"  {len(filas)} partidos con resultado")
 
     print("Calculando la brecha de cada partido...")
-    b = brechas(filas)
-    print(f"  {len(b)} brechas")
+    b, signos = brechas(filas)
+    print(f"  {len(b)} brechas, {len(signos)} con signo conocido")
 
     # ------------------------------------------------------------------
     # Inventario: ¿hasta dónde llegan los porcentajes de LAE?
@@ -188,8 +213,30 @@ def main() -> int:
     print("INVENTARIO DE PORCENTAJES DE LAE")
     print("=" * 66)
 
-    jornadas = api.contexto_quiniela(limite=min(args.jornadas, 50))
+    # contexto_quiniela topa en 50 por llamada, así que se recorre temporada
+    # a temporada. Las temporadas se sacan de las fechas de los resultados:
+    # no hay que mantener una lista a mano que se quede vieja cada agosto.
+    años = sorted({
+        (datetime.fromisoformat(f["fecha_hora_inicio"]).year
+         if datetime.fromisoformat(f["fecha_hora_inicio"]).month >= 7
+         else datetime.fromisoformat(f["fecha_hora_inicio"]).year - 1)
+        for f in filas if f.get("fecha_hora_inicio")
+    })
+    temporadas = [f"{a}-{str(a + 1)[2:]}" for a in años]
+    print(f"  temporadas con resultados: {', '.join(temporadas)}")
+
+    jornadas = []
+    for t in temporadas:
+        try:
+            lote = api.contexto_quiniela(temporada=t, limite=50)
+        except Exception as exc:                     # noqa: BLE001
+            print(f"    {t}: {exc}")
+            continue
+        jornadas.extend(lote)
     print(f"  {len(jornadas)} jornadas en la base")
+    if args.jornadas and len(jornadas) > args.jornadas:
+        jornadas = jornadas[-args.jornadas:]
+        print(f"  se miran las {len(jornadas)} más recientes")
 
     muestras = []          # (brecha, desvio_publico, nombre)
     resultados = []        # (brecha, gano_el_favorito)
@@ -229,7 +276,7 @@ def main() -> int:
             # tabla hacía que la terna fuese None siempre y el script
             # descartara todas las casillas antes de mirarlas.
             mer = terna(c.get("mercado"), "p1", "px", "p2")
-            if not lae or not mer:
+            if not lae:
                 continue
             hubo = True
 
@@ -239,66 +286,136 @@ def main() -> int:
                 sin_emparejar += 1
                 continue
 
-            # El favorito lo decide el MERCADO, no nosotros: es el precio
-            # con dinero detrás, y la pregunta es si el público se desvía
-            # de él.
-            i = int(np.argmax(mer))
-            desvio = lae[i] - mer[i]      # >0: el público lo juega de más
-
-            # La brecha está orientada al local. Para el visitante hay que
-            # darle la vuelta, o los dos casos se cancelarían entre sí.
-            brecha = b[k] if i == 0 else (-b[k] if i == 2 else 0.0)
+            # El favorito del PÚBLICO: a quién juega más gente. La pregunta
+            # es si ese favorito gana menos de lo que la gente cree cuando
+            # arrastra reputación que su forma no respalda.
+            i = int(np.argmax(lae))
             if i == 1:
-                continue                  # el empate no tiene "reputación"
+                continue          # el empate no tiene "reputación" que medir
 
-            muestras.append((brecha, desvio,
-                             f"{c.get('local')} - {c.get('visitante')}"))
+            # La brecha está orientada al local; para el visitante hay que
+            # darle la vuelta, o los dos casos se cancelarían entre sí.
+            brecha = b[k] if i == 0 else -b[k]
+            real = signos.get(k)
+            if real is None:
+                continue
+
+            acerto = 1.0 if real == ("1" if i == 0 else "2") else 0.0
+            nombre = f"{c.get('local')} - {c.get('visitante')}"
+            resultados.append((brecha, float(lae[i]), acerto, nombre))
+
+            # El desvío contra el mercado solo cuando hay cuotas: en el
+            # histórico no las hay, y esperar a tenerlas habría dejado sin
+            # medir lo que ya se puede medir.
+            if mer:
+                muestras.append((brecha, lae[i] - mer[i], nombre))
 
         if hubo:
             con_lae += 1
 
-    print(f"  {con_lae} jornadas con porcentajes de LAE Y cuotas")
-    print(f"  {len(muestras)} casillas utilizables")
+    print(f"  {con_lae} jornadas con porcentajes de LAE")
+    print(f"  {len(resultados)} casillas con LAE y resultado conocido")
+    print(f"  {len(muestras)} de ellas con cuotas de mercado además")
     if sin_emparejar:
-        print(f"  {sin_emparejar} casillas que no casan con ningún resultado "
-              "(nombres distintos o partido aún sin jugar)")
+        print(f"  {sin_emparejar} casillas que no casan con ningún resultado")
+        pct = 100 * sin_emparejar / max(sin_emparejar + len(resultados), 1)
+        if pct > 20:
+            print(f"    ATENCIÓN: es el {pct:.0f}%. Los nombres del boleto y")
+            print("    los de la tabla de resultados no se están emparejando")
+            print("    bien, y lo de abajo mide una submuestra sesgada.")
 
     # ------------------------------------------------------------------
-    # B. ¿Predice la brecha el error del público?
+    # B. ¿Acierta menos el público cuando juega a la reputación?
     # ------------------------------------------------------------------
     print("\n" + "=" * 66)
-    print("B · ¿SOBREJUEGA EL PÚBLICO AL FAVORITO CON REPUTACIÓN?")
+    print("B · ¿FALLA MÁS EL PÚBLICO CUANDO JUEGA A LA REPUTACIÓN?")
     print("=" * 66)
+    print()
+    print("  Para cada casilla se toma el signo que más juega la gente y se")
+    print("  compara lo que la gente le da con lo que de verdad ocurrió.")
+    print("  Si el público estuviera bien calibrado, un signo jugado al 60%")
+    print("  saldría el 60% de las veces.")
 
-    if len(muestras) < 30:
-        print(f"\n  Solo hay {len(muestras)} casillas. Hacen falta bastantes")
-        print("  más para distinguir una correlación del ruido.")
-        print("\n  No es un fallo: la captura de LAE empezó con este")
-        print("  proyecto. Se puede repetir dentro de unos meses, y para")
-        print("  entonces cada jornada habrá añadido 14 casillas.")
+    if len(resultados) < 100:
+        print(f"\n  Solo hay {len(resultados)} casillas: insuficiente.")
     else:
-        xs = [m[0] for m in muestras]
-        ys = [m[1] for m in muestras]
-        r, err = correlacion(xs, ys)
-        print(f"\n  n = {len(muestras)}")
-        print(f"  correlación brecha ↔ (LAE − mercado) del favorito: "
-              f"{r:+.3f} ± {err:.3f}")
-        print()
-        if not np.isnan(err) and abs(r) - err > 0.05:
-            print("  Hay señal. Cuanto mayor es la brecha entre reputación y")
-            print("  forma, más sobrejuega el público al favorito. Eso es")
-            print("  exactamente el valor que busca el sistema.")
-        else:
-            print("  El intervalo incluye el cero o casi: con estos datos no")
-            print("  se puede afirmar que exista relación. No es que no la")
-            print("  haya; es que no se ve todavía.")
+        br = np.array([r[0] for r in resultados])
+        pub = np.array([r[1] for r in resultados])
+        ok = np.array([r[2] for r in resultados])
 
-        # Los casos extremos, para poder mirarlos a mano.
-        muestras.sort(key=lambda m: -m[0])
-        print("\n  Las cinco de mayor brecha:")
-        for br, de, nom in muestras[:5]:
-            print(f"    {nom[:44]:<44} brecha {br:>+6.2f}  "
-                  f"público {de:>+.1%}")
+        # Se parte por cuartiles de brecha en vez de por un umbral elegido a
+        # dedo: un umbral se puede mover hasta que salga lo que uno quiere.
+        cortes = np.percentile(br, [25, 50, 75])
+        tramos = [
+            ("brecha baja (reputación ≈ forma)", br <= cortes[0]),
+            ("brecha media-baja", (br > cortes[0]) & (br <= cortes[1])),
+            ("brecha media-alta", (br > cortes[1]) & (br <= cortes[2])),
+            ("brecha alta (reputación >> forma)", br > cortes[2]),
+        ]
+
+        print()
+        print(f"  {'tramo':<36} {'n':>5} {'juega':>7} {'ocurre':>7} {'error':>8}")
+        for nombre, m in tramos:
+            if m.sum() < 20:
+                continue
+            juega = float(pub[m].mean())
+            ocurre = float(ok[m].mean())
+            print(f"  {nombre:<36} {int(m.sum()):>5} {juega:>6.1%} "
+                  f"{ocurre:>6.1%} {ocurre - juega:>+8.1%}")
+
+        print()
+        print("  La columna 'error' es lo que importa. Negativa significa que")
+        print("  el público se pasa: juega ese signo más de lo que ocurre.")
+        print("  Lo que buscamos es que sea MÁS negativa en la brecha alta")
+        print("  que en la baja. Si es igual de negativa en todos los tramos,")
+        print("  el público se pasa siempre y la reputación no explica nada.")
+
+        alto = tramos[3][1]
+        bajo = tramos[0][1]
+        if alto.sum() >= 20 and bajo.sum() >= 20:
+            e_alto = float(ok[alto].mean() - pub[alto].mean())
+            e_bajo = float(ok[bajo].mean() - pub[bajo].mean())
+            print(f"\n  diferencia entre extremos: {e_alto - e_bajo:+.1%}")
+
+            # ¿Es eso más de lo que daría el azar? Se baraja la brecha y se
+            # mira cuántas veces sale una diferencia igual de grande por
+            # casualidad. Sin esto, cualquier número parece un hallazgo.
+            rng = np.random.default_rng(23)
+            observado = e_alto - e_bajo
+            veces = 0
+            for _ in range(2000):
+                mezcla = rng.permutation(br)
+                ca = np.percentile(mezcla, [25, 75])
+                a = mezcla > ca[1]
+                z = mezcla <= ca[0]
+                if a.sum() < 20 or z.sum() < 20:
+                    continue
+                d = ((ok[a].mean() - pub[a].mean())
+                     - (ok[z].mean() - pub[z].mean()))
+                if abs(d) >= abs(observado):
+                    veces += 1
+            p_valor = veces / 2000
+            print(f"  probabilidad de ver esto por azar: {p_valor:.3f}")
+            print()
+            if p_valor < 0.05 and observado < 0:
+                print("  HAY SEÑAL. El público sobrejuega al favorito con")
+                print("  reputación por encima de su forma más de lo que")
+                print("  sobrejuega a los demás. Eso es valor aprovechable.")
+            elif p_valor < 0.05:
+                print("  Hay señal, pero en la dirección CONTRARIA a la")
+                print("  esperada. Merece mirarse antes de usarla.")
+            else:
+                print("  No hay señal: lo observado entra dentro de lo que")
+                print("  produce el azar. La idea se descarta.")
+
+        # Y la versión contra el mercado, si hay cuotas.
+        if len(muestras) >= 30:
+            xs = [m[0] for m in muestras]
+            ys = [m[1] for m in muestras]
+            r, err = correlacion(xs, ys)
+            print(f"\n  (con las {len(muestras)} casillas que sí tienen")
+            print(f"   cuotas, la correlación brecha ↔ desvío del público")
+            print(f"   frente al mercado es {r:+.3f} ± {err:.3f})")
 
     # ------------------------------------------------------------------
     # A. ¿Predice la brecha el resultado, más allá de Elo y forma?

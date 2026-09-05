@@ -1,48 +1,70 @@
 Sustituye  analisis/riesgo_favorito.py
 
 El workflow no cambia. Actions → "Riesgo del favorito" → Run workflow.
-El parámetro de jornadas da igual: la API tope en 50.
+Deja el campo de jornadas vacío o pon 0 para mirarlas todas.
+
+Tarda unos minutos: recorre las jornadas de todas las temporadas, una
+llamada por jornada.
 
 
-DOS FALLOS CORREGIDOS
+LO QUE YA SABEMOS DE LA EJECUCIÓN ANTERIOR
+
+A está cerrada, en negativo. La interacción se activa en 962 de 4.407
+partidos —o sea que no fue falta de muestra— y aun así empeora el log-loss:
+-0,0005 el producto, -0,0002 la asimétrica. El control dio +0,0001, así que
+el test estaba bien montado.
+
+El mercado ya descuenta la mala racha del favorito. Ahí no hay nada.
 
 
-1) EL BLOQUE B DABA 0 POR UN NOMBRE DE CAMPO
+POR QUÉ B DABA 0, Y CÓMO SE ARREGLA
 
-   contexto_dashboard.php devuelve el mercado con las claves p1/px/p2. Yo
-   usé prob_mercado_local/empate/visitante, que son los nombres de la
-   columna de la tabla, los que usa index.php cuando lee la base
-   directamente.
+El diagnóstico lo dijo:
 
-   La terna daba None siempre, así que el script descartaba las 700
-   casillas antes de mirarlas. Los ceros no significaban que no hubiera
-   datos: significaban que preguntaba mal.
+    (ejemplo de casilla: probabilidades=['LAE_CIERRE'] mercado=[])
 
-   Ahora, si algo vuelve a no encajar, imprime las claves reales de la
-   primera casilla en vez de dejarte deducirlo de un cero.
+Los porcentajes de LAE están. Lo que falta son las CUOTAS: la captura
+empezó con este proyecto, así que solo existen las de las últimas jornadas.
+
+Comparar al público con el mercado dejaba fuera todo el histórico. Ahora se
+compara con lo que de verdad pasó, que además es mejor pregunta:
+
+    si la gente juega un signo al 60%, debería salir el 60% de las veces
+
+Cuando no sale, ahí está el valor. Y la pregunta es si falla MÁS donde la
+reputación va por delante de la forma.
 
 
-2) EL BLOQUE A NO MEDÍA NADA
+LO QUE VA A IMPRIMIR
 
-   Le pasaba al modelo (elo − forma), que es una combinación LINEAL de dos
-   columnas que ya tenía. Un modelo lineal no puede sacar nada de eso: es
-   colineal. Aquel +0,0001 era ruido numérico.
+    tramo                                 n    juega  ocurre    error
+    brecha baja (reputación ~ forma)   NNNN    xx.x%   xx.x%   -x.x%
+    brecha media-baja                  NNNN    ...
+    brecha media-alta                  NNNN    ...
+    brecha alta (reputación >> forma)  NNNN    ...
 
-   Y contradecía lo que yo mismo había explicado: dije que la regresión no
-   puede expresar productos, solo sumas, y le pasé una suma.
+    diferencia entre extremos: -x.x%
+    probabilidad de ver esto por azar: 0.xxx
 
-   Ahora prueba tres variantes, y la primera es un control:
+La columna 'error' negativa significa que el público se pasa. Lo que
+buscamos es que sea MÁS negativa en la brecha alta que en la baja. Si es
+igual de negativa en los cuatro tramos, el público se pasa siempre y la
+reputación no explica nada.
 
-     resta elo − forma        tiene que dar ~0. Si diera algo grande, el
-                              test estaría mal montado
-     producto elo × forma     la interacción sin más
-     fuerte-en-mala-forma     la idea concreta: solo se activa cuando el
-                              equipo es fuerte Y viene mal, más su
-                              simétrica para el visitante
+Los tramos son cuartiles, no un umbral a mano: un umbral se puede mover
+hasta que salga lo que uno quiere.
 
-   Comprobado con datos sintéticos: la resta da −0,0001, igual que en tu
-   ejecución.
+El p-valor sale de barajar la brecha 2.000 veces y contar cuántas el azar
+produce una diferencia igual de grande. Probado con datos simulados:
+detecta efectos reales con p entre 0,001 y 0,002, y con efecto cero da
+p > 0,05.
 
-   Imprime también en cuántos partidos se activa la interacción asimétrica.
-   En las pruebas era un 9%: una mejora diluida en el promedio de todos
-   puede ser grande donde actúa, y sin ese número no se distingue.
+
+MIRA TAMBIÉN ESTA LÍNEA
+
+    NNN casillas que no casan con ningún resultado
+
+Los nombres del boleto ('Ath.Club') y los de la tabla de resultados
+('Athletic Club') no siempre coinciden. Si ese número pasa del 20% el
+script avisa, porque entonces estaría midiendo una submuestra sesgada y no
+habría que creerse el resultado.
