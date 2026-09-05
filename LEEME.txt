@@ -1,36 +1,49 @@
-GITHUB — sustituye estos archivos
-=================================
+DOS ARCHIVOS NUEVOS. No sustituye nada.
 
-   ia/analizar.py
-   web/index.php
-   web/lanzar_ia.php                (nuevo)
-   web/config_ia.php.ejemplo        (nuevo — la plantilla, sin secretos)
-   php/guardar_analisis_ia.php
-   php/04_tabla_lanzamientos_ia.sql (nuevo)
-   .github/workflows/analizar_ia.yml
+    analisis/riesgo_favorito.py
+    .github/workflows/riesgo_favorito.yml
 
-AÑADE AL .gitignore
+Compatible con las 14 características que tienes ahora: solo usa
+elo_diferencia y forma_diferencia, que existen igual. El cambio de la forma
+por temporada sigue aparcado y este script no lo necesita.
 
-   web/config_ia.php
+NO TOCA NADA. Solo lee y escribe por pantalla.
 
-   Ese archivo lleva el token de GitHub y la clave del botón. Solo existe
-   en IONOS.
 
-QUÉ CAMBIA
+CÓMO LANZARLO
 
-El análisis ya no lo dispara solo un cron. El panel tiene un botón que lo
-lanza cuando tú decides, dentro de las 12 horas anteriores al primer
-partido.
+    Actions → "Riesgo del favorito" → Run workflow
 
-El cron sigue existiendo como red: si un sábado no estás delante del
-ordenador, salta solo a las 5 horas. Si ya lanzaste tú, la clave única lo
-impide y no gasta nada.
 
-El circuito:
+QUÉ VA A IMPRIMIR, EN TRES BLOQUES
 
-   panel → lanzar_ia.php → API de GitHub → workflow → analizar.py
-        → guardar_analisis_ia.php → cierra el candado
-        → el panel rehace la propuesta y congela el boleto
+1) INVENTARIO
+   Cuántas jornadas tienen porcentajes de LAE Y cuotas a la vez, y cuántas
+   casillas salen utilizables. Mira también la línea de "casillas que no
+   casan con ningún resultado": si ese número es alto, es que los nombres
+   del boleto y los de la tabla de resultados no coinciden y habría que
+   emparejarlos mejor antes de creerse nada.
 
-analizar.py acepta --solicitud N. Cuando viene del botón se salta la
-ventana de las 5 horas, porque lanzar_ia.php ya comprobó la de 12.
+2) B · ¿SOBREJUEGA EL PÚBLICO AL FAVORITO CON REPUTACIÓN?
+   La pregunta que importa. Da la correlación con su intervalo de
+   confianza al 90%, no solo el número: con muestras pequeñas un 0,20
+   puede ser perfectamente compatible con cero.
+
+   Es bastante probable que diga que no hay datos suficientes. La captura
+   de LAE empezó con este proyecto, así que puede que haya cuatro o cinco
+   jornadas. Eso no es un fallo del script: es el estado real de la base,
+   y conviene saberlo antes de construir nada encima.
+
+3) A · ¿PREDICE MEJOR EL RESULTADO?
+   Esta se mide con los 4.402 partidos, así que siempre sale. Espero que
+   diga que no aporta, y sería el resultado correcto: el mercado ya
+   descuenta la mala racha del favorito.
+
+
+LO QUE NO HAY QUE HACER CON ESTO
+
+Si B sale con señal, todavía no es una mejora: es una hipótesis que ha
+sobrevivido a un test. Con 14 características se pueden inventar 91
+interacciones y unas cuantas parecen buenas por azar. Esta se eligió y se
+describió ANTES de mirar los datos, que es lo único que la hace válida. Si
+no sale, no se prueban las otras 90 hasta que una funcione.
