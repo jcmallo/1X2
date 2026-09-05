@@ -484,6 +484,21 @@ class ApiIngesta:
             timeout=90,
         )
 
+    def guardar_pleno(self, payload: dict) -> dict:
+        """
+        Guarda una captura del Pleno al 15 (goles 0/1/2/M por lado).
+
+        Va en un endpoint aparte del importador histórico porque aquel solo
+        etiqueta el Pleno como LAE o modelo propio, y hace falta poder decir
+        que viene del mercado para comparar después cuál acierta más.
+        """
+        return self._request_json(
+            "POST",
+            "guardar_pleno.php",
+            json=payload,
+            timeout=60,
+        )
+
     def guardar_pronostico(self, payload: dict) -> dict:
         """
         Guarda el pronóstico propio de una jornada como MODELO_PROPIO.
