@@ -43,8 +43,12 @@ from datetime import datetime
 # habitual en fútbol: un mes de competición.
 VENTANA_FORMA = 5
 
-# Enfrentamientos directos que se tienen en cuenta.
-VENTANA_DIRECTOS = 3
+# Enfrentamientos directos que se tienen en cuenta, contando los dos campos.
+# Antes solo se miraban los del mismo campo y con ventana 3: en un
+# Getafe-Celta había 4 partidos en casa del Getafe y otros 4 en casa del
+# Celta, y el modelo usaba 3 de los 8. Con seis se cubren tres temporadas de
+# enfrentamientos sin arrastrar plantillas de hace demasiado.
+VENTANA_DIRECTOS = 6
 
 # Días de descanso a partir de los cuales da igual descansar más.
 TOPE_DESCANSO = 14
@@ -115,7 +119,13 @@ class Estado:
         f_loc, gf_loc, gc_loc = self._forma(local)
         f_vis, gf_vis, gc_vis = self._forma(visitante)
 
-        previos = self.directos[(local, visitante)][-VENTANA_DIRECTOS:]
+        # Se cuentan los dos campos. Un Celta-Getafe dice mucho sobre un
+        # Getafe-Celta: lo que cambia es quién juega en casa, y eso ya lo
+        # recoge la ventaja de local. Los de fuera se invierten, porque un
+        # 1 del Celta en su campo es un 0 desde el punto de vista del Getafe.
+        ida = self.directos[(local, visitante)]
+        vuelta = [1.0 - r for r in self.directos[(visitante, local)]]
+        previos = (ida + vuelta)[-VENTANA_DIRECTOS:]
 
         return [
             (self.valoracion(local) - self.valoracion(visitante)) / 100.0,
