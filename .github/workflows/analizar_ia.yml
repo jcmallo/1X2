@@ -13,7 +13,9 @@ name: Analizar jornada con IA
 # construye una historia convincente sobre evidencia floja— y el que la
 # escribe no lo ve porque acaba de convencerse a sí mismo.
 #
-# Cuesta unos 0,25 EUR por ejecución. El boleto de una jornada cuesta 6 EUR.
+# Cuesta unos 1,90 EUR por ejecución: los resultados de las búsquedas entran
+# como tokens de entrada y son la mayor parte de la factura. El boleto de una
+# jornada cuesta 6 EUR.
 #
 # Va DESPUÉS de proponer el boleto: analiza la propuesta ya calculada en
 # lugar de sustituirla. Y no la modifica: guarda los ajustes sugeridos con su
@@ -21,9 +23,20 @@ name: Analizar jornada con IA
 
 on:
   schedule:
-    # Sábado 12:45 UTC, después de que la propuesta esté calculada y cerca
-    # del cierre, que es cuando la prensa ya ha publicado las alineaciones.
-    - cron: "45 12 * * 6"
+    # Se dispara cada hora, pero casi siempre sale a los tres segundos sin
+    # gastar un céntimo: el script mira cuánto falta para el primer partido
+    # y solo analiza si faltan cinco horas (media hora de margen).
+    #
+    # Se hace así porque la hora del primer partido cambia cada semana: unas
+    # jornadas empiezan el viernes por la noche y otras el sábado a mediodía.
+    # Un cron fijo llegaría pronto una semana y tarde la siguiente — que es
+    # justo lo que pasó el 5 de septiembre, con cuatro partidos ya en juego
+    # cuando terminó el análisis.
+    #
+    # Una ejecución que se salta no llama a Claude ni busca nada, así que
+    # veinte disparos para acertar uno cuestan lo mismo que uno solo.
+    - cron: "0 12-21 * * 5"    # viernes tarde  (UTC)
+    - cron: "0 5-18 * * 6"     # sábado         (UTC)
   workflow_dispatch:
     inputs:
       temporada:
@@ -40,6 +53,16 @@ on:
         default: "T-24"
         type: choice
         options: ["T-72", "T-24", "T-2", "CIERRE"]
+      solicitud:
+        description: "Id del lanzamiento pedido desde el panel (lo rellena la web)"
+        required: false
+        default: ""
+        type: string
+      forzar:
+        description: "Analizar aunque no falten 5 h para el primer partido"
+        required: false
+        default: true
+        type: boolean
       sin_revision:
         description: "Saltar la segunda opinión que revisa los ajustes"
         required: false
@@ -93,6 +116,8 @@ jobs:
           ARGS="--tipo ${{ inputs.tipo || 'T-24' }}"
           if [ -n "${{ inputs.temporada }}" ]; then ARGS="$ARGS --temporada ${{ inputs.temporada }}"; fi
           if [ -n "${{ inputs.jornada }}" ]; then ARGS="$ARGS --jornada ${{ inputs.jornada }}"; fi
+          if [ -n "${{ inputs.solicitud }}" ]; then ARGS="$ARGS --solicitud ${{ inputs.solicitud }}"; fi
+          if [ "${{ inputs.forzar }}" = "true" ]; then ARGS="$ARGS --forzar"; fi
           if [ "${{ inputs.sin_web }}" = "true" ]; then ARGS="$ARGS --sin-web"; fi
           if [ "${{ inputs.sin_revision }}" = "true" ]; then ARGS="$ARGS --sin-revision"; fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
