@@ -24,7 +24,12 @@ on:
         type: choice
         options:
           - "temporada actual"
+          - "una temporada"
           - "rango de fechas"
+      temporada:
+        description: "Solo para 'una temporada': el año de inicio, p.ej. 2016 para la 2016-17"
+        required: false
+        type: string
       desde:
         description: "Solo para 'rango de fechas': AAAA-MM-DD"
         required: false
@@ -75,11 +80,19 @@ jobs:
           INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
           INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
         run: |
-          if [ "${{ inputs.modo }}" = "rango de fechas" ]; then
-            ARGS="--desde ${{ inputs.desde }}"
-            if [ -n "${{ inputs.hasta }}" ]; then ARGS="$ARGS --hasta ${{ inputs.hasta }}"; fi
-          else
-            ARGS="--temporada-actual"
-          fi
+          case "${{ inputs.modo }}" in
+            "rango de fechas")
+              ARGS="--desde ${{ inputs.desde }}"
+              if [ -n "${{ inputs.hasta }}" ]; then ARGS="$ARGS --hasta ${{ inputs.hasta }}"; fi
+              ;;
+            "una temporada")
+              # La temporada de fútbol va de agosto a julio del año siguiente.
+              A="${{ inputs.temporada }}"
+              ARGS="--desde ${A}-08-01 --hasta $((A+1))-07-31"
+              ;;
+            *)
+              ARGS="--temporada-actual"
+              ;;
+          esac
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           python -m historico.importar_selae $ARGS
