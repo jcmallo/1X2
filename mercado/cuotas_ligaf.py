@@ -1,5 +1,7 @@
 """
-Cuotas de Liga F, que ninguna API de las que usamos cubre.
+Cuotas de Liga F y marcador exacto del Pleno al 15.
+
+Dos huecos que ninguna API de las que usamos cubre.
 
 Por qué existe
 --------------
@@ -26,9 +28,16 @@ Bwin, William Hill, Unibet, 1xBet...). Se toma la MEDIANA de todas ellas y
 no la mejor cuota: la mejor suele ser la de la casa más agresiva o la que
 tiene un error, y lo que buscamos es el consenso, no la oferta.
 
-Además del 1X2 se lee el mercado de marcador exacto, del que se derivan las
-probabilidades del Pleno al 15: sumando por filas y columnas de la matriz de
-marcadores salen los goles de cada equipo (0, 1, 2 o M para tres o más).
+El segundo hueco es el Pleno al 15. Se juega a goles de cada equipo (0, 1,
+2 o M para tres o más), y eso sale del mercado de marcador exacto sumando la
+matriz por filas y por columnas. The Odds API solo da 1X2, así que ese dato
+no estaba en ninguna parte.
+
+El Pleno casi nunca es un partido de Liga F —en la jornada 4 era
+Getafe-Celta, de LaLiga— así que el script recorre también LaLiga y Segunda,
+pero solo abre la ficha del partido que ES el Pleno: de esas dos
+competiciones ya hay cuotas por The Odds API, y de mejor calidad, porque los
+exchanges cotizan con un 0,8% de margen frente al 6% de estas casas.
 
 El control de calidad que no puede faltar
 ------------------------------------------
@@ -71,8 +80,17 @@ except ImportError:  # pragma: no cover
     cr = None
 
 
-LISTADO = "https://www.sportytrader.com/en/odds/football/spain/liga-femenina-52824/"
 BASE = "https://www.sportytrader.com"
+
+# Liga F es la razón de ser del script: ninguna API la cubre. LaLiga y
+# Segunda se recorren solo para encontrar el Pleno al 15, que casi siempre
+# es un partido masculino y cuyo marcador exacto no da The Odds API.
+LISTADOS = {
+    "Liga F": BASE + "/en/odds/football/spain/liga-femenina-52824/",
+    "LaLiga": BASE + "/en/odds/football/spain/laliga-108/",
+    "Segunda": BASE + "/en/odds/football/spain/segunda-division-109/",
+}
+LISTADO = LISTADOS["Liga F"]
 
 # El comparador responde 403 a las peticiones normales: filtra por huella
 # TLS, igual que SELAE. curl_cffi reproduce la de un navegador.
@@ -368,18 +386,37 @@ def main() -> int:
 
     api = ApiIngesta()
 
+    # Se piden los partidos de las tres competiciones: las cuotas de Liga F
+    # son el objetivo principal, pero el Pleno puede caer en cualquiera.
     pendientes = api.contexto_cuotas(
-        dias_futuro=10, retro_horas=6, solo_sin_cuotas=False, limite=60,
-        genero="FEMENINO",
+        dias_futuro=10, retro_horas=6, solo_sin_cuotas=False, limite=200,
     )
-    print(f"Partidos de Liga F en la base: {len(pendientes)}")
+    femeninos = sum(1 for p in pendientes if p.get("genero") == "FEMENINO")
+    print(f"Partidos en la base: {len(pendientes)} ({femeninos} de Liga F)")
     if not pendientes:
         print("No hay partidos próximos. Nada que capturar.")
         return 0
 
     print("Leyendo el comparador...")
-    anunciados = partidos_del_listado(pedir(LISTADO))
-    print(f"  {len(anunciados)} partidos con cuotas publicadas\n")
+    anunciados = []
+    vistos = set()
+    for etiqueta, url in LISTADOS.items():
+        try:
+            lote = partidos_del_listado(pedir(url))
+        except RuntimeError as exc:
+            print(f"  {etiqueta}: {exc}")
+            continue
+        nuevos = 0
+        for c in lote:
+            if c["url"] in vistos:
+                continue
+            vistos.add(c["url"])
+            c["liga"] = etiqueta
+            anunciados.append(c)
+            nuevos += 1
+        print(f"  {etiqueta}: {nuevos} partidos")
+        time.sleep(PAUSA)
+    print()
 
     if not anunciados:
         print(
@@ -415,13 +452,32 @@ def main() -> int:
 
         mejor, score = None, 0.0
         for p_ in pendientes:
-            s = (parecido(nl, normalizar(p_["equipo_local"]))
-                 + parecido(nv, normalizar(p_["equipo_visitante"]))) / 2
-            if s > score:
-                score, mejor = s, p_
+            s_ = (parecido(nl, normalizar(p_["equipo_local"]))
+                  + parecido(nv, normalizar(p_["equipo_visitante"]))) / 2
+            if s_ > score:
+                score, mejor = s_, p_
 
         if not mejor or score < UMBRAL:
-            sin_emparejar.append((cand, mejor, score))
+            # Solo se informa de los femeninos: de LaLiga y Segunda se
+            # recorren decenas de partidos que no interesan y llenarían el
+            # log de ruido.
+            if cand.get("liga") == "Liga F":
+                sin_emparejar.append((cand, mejor, score))
+            continue
+
+        es_femenino = mejor.get("genero") == "FEMENINO"
+        es_pleno = (
+            casilla15 is not None
+            and jornada_actual is not None
+            and casilla15.get("partido_id") is not None
+            and int(casilla15["partido_id"]) == int(mejor["partido_id"])
+        )
+
+        # De LaLiga y Segunda ya hay cuotas por The Odds API, y de mejor
+        # calidad: los exchanges cotizan con un 0,8% de margen frente al 6%
+        # de estas casas. Solo se abre su ficha si son el Pleno, porque el
+        # marcador exacto no lo da ninguna otra fuente.
+        if not es_femenino and not es_pleno:
             continue
 
         time.sleep(PAUSA)
@@ -431,61 +487,53 @@ def main() -> int:
             print(f"  {cand['local']} - {cand['visitante']}: {exc}")
             continue
 
-        cuotas = leer_1x2(texto)
-        if not cuotas:
-            print(f"  {cand['local']} - {cand['visitante']}: sin 1X2 legible")
-            continue
+        if es_femenino:
+            cuotas = leer_1x2(texto)
+            if not cuotas:
+                print(f"  {cand['local']} - {cand['visitante']}: sin 1X2 legible")
+            else:
+                inv = [1 / cuotas["cuota_local"], 1 / cuotas["cuota_empate"],
+                       1 / cuotas["cuota_visitante"]]
+                t = sum(inv)
+                print(
+                    f"  [{score:.2f}] {cand['local'][:20]:<20} - {cand['visitante'][:20]:<20} "
+                    f"{cuotas['cuota_local']}/{cuotas['cuota_empate']}/{cuotas['cuota_visitante']}"
+                    f"  →  {inv[0]/t*100:.0f}/{inv[1]/t*100:.0f}/{inv[2]/t*100:.0f}"
+                    f"  ({cuotas['casas']} casas, margen {cuotas['margen']:.1%})"
+                )
+                if not args.dry_run:
+                    api.guardar_cuota({
+                        "partido_id": int(mejor["partido_id"]),
+                        "casa_apuestas": CASA,
+                        "mercado": "1X2",
+                        "capturado_en": datetime.now(timezone.utc)
+                                                .astimezone(timezone(timedelta(hours=2)))
+                                                .strftime("%Y-%m-%d %H:%M:%S"),
+                        "franja_temporal": args.franja,
+                        "cuota_local": cuotas["cuota_local"],
+                        "cuota_empate": cuotas["cuota_empate"],
+                        "cuota_visitante": cuotas["cuota_visitante"],
+                        "fuente": "sportytrader",
+                    })
+                    guardadas += 1
 
-        inv = [1 / cuotas["cuota_local"], 1 / cuotas["cuota_empate"],
-               1 / cuotas["cuota_visitante"]]
-        s = sum(inv)
-        print(
-            f"  [{score:.2f}] {cand['local'][:20]:<20} - {cand['visitante'][:20]:<20} "
-            f"{cuotas['cuota_local']}/{cuotas['cuota_empate']}/{cuotas['cuota_visitante']}"
-            f"  →  {inv[0]/s*100:.0f}/{inv[1]/s*100:.0f}/{inv[2]/s*100:.0f}"
-            f"  ({cuotas['casas']} casas, margen {cuotas['margen']:.1%})"
-        )
-
-        if not args.dry_run:
-            api.guardar_cuota({
-                "partido_id": int(mejor["partido_id"]),
-                "casa_apuestas": CASA,
-                "mercado": "1X2",
-                "capturado_en": datetime.now(timezone.utc)
-                                        .astimezone(timezone(timedelta(hours=2)))
-                                        .strftime("%Y-%m-%d %H:%M:%S"),
-                "franja_temporal": args.franja,
-                "cuota_local": cuotas["cuota_local"],
-                "cuota_empate": cuotas["cuota_empate"],
-                "cuota_visitante": cuotas["cuota_visitante"],
-                "fuente": "sportytrader",
-            })
-            guardadas += 1
-
-        if args.sin_pleno:
-            continue
-
-        # ¿Es este partido el Pleno de la jornada?
-        es_pleno = (
-            casilla15 is not None
-            and jornada_actual is not None
-            and casilla15.get("partido_id") is not None
-            and int(casilla15["partido_id"]) == int(mejor["partido_id"])
-        )
-        if not es_pleno:
+        if not es_pleno or args.sin_pleno:
             continue
 
         pleno = leer_pleno(texto)
         if not pleno:
-            print("      es la casilla 15, pero el Pleno se descarta: "
-                  "faltan marcadores o el margen es anómalo")
+            print(
+                f"  PLENO {cand['local']} - {cand['visitante']}: descartado, "
+                "faltan marcadores o el margen es anómalo"
+            )
             continue
 
         l, v = pleno["local"], pleno["visitante"]
         print(
-            f"      PLENO  local {l['p0']:.0%}/{l['p1']:.0%}/{l['p2']:.0%}/{l['pm']:.0%}"
-            f"  visitante {v['p0']:.0%}/{v['p1']:.0%}/{v['p2']:.0%}/{v['pm']:.0%}"
-            f"  ({pleno['marcadores']} marcadores, margen {pleno['margen']:.0%})"
+            f"  PLENO {cand['local'][:16]} - {cand['visitante'][:16]}\n"
+            f"      local     0:{l['p0']:.0%} 1:{l['p1']:.0%} 2:{l['p2']:.0%} M:{l['pm']:.0%}\n"
+            f"      visitante 0:{v['p0']:.0%} 1:{v['p1']:.0%} 2:{v['p2']:.0%} M:{v['pm']:.0%}\n"
+            f"      ({pleno['marcadores']} marcadores, margen {pleno['margen']:.0%})"
         )
         plenos += 1
 
