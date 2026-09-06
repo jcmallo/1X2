@@ -70,14 +70,17 @@ class Casilla:
         return max(SIGNOS, key=lambda s: fuente[s])
 
 
-# Probabilidad mínima que debe tener el segundo signo para que merezca la
-# pena abrir un doble. Por debajo de esto, la casilla se queda simple aunque
-# su valor sea altísimo: pagar el doble de columnas por un signo al 15% sale
-# perdiendo aunque el público lo juegue poco.
-SEGUNDO_MINIMO_ABRIR = 0.22
+# Qué fracción de `probabilidad_minima` debe alcanzar el segundo signo para
+# que merezca la pena abrir un doble.
+#
+# Va atado a ese parámetro y no es un número suelto: `probabilidad_minima`
+# (0,30) salió de las 989 jornadas del histórico, y colgar de él una
+# proporción es más defendible que inventarse un umbral nuevo. Con 0,30 da
+# 0,225.
+FRACCION_SEGUNDO = 0.75
 
 
-def _prioridad_apertura(c: Casilla) -> float:
+def _prioridad_apertura(c: Casilla, probabilidad_minima: float = 0.30) -> float:
     """
     Cuánto merece la pena abrir esta casilla a doble.
 
@@ -95,21 +98,6 @@ def _prioridad_apertura(c: Casilla) -> float:
     if not c.tiene_probabilidad:
         return h * 0.6
 
-    # La curva del público NUNCA abre un doble.
-    #
-    # No sabe quién juega: convierte cualquier reparto en algo parecido a
-    # 25/30/45, así que todos los partidos le parecen abiertos. En la
-    # jornada 4 de 2026-27 eso se llevó los TRES dobles del boleto a Liga F
-    # —la competición con los resultados más claros— porque el público se
-    # concentra mucho allí y la curva lo aplanaba:
-    #
-    #     Sevilla F - Barça F   público 6/13/81  →  curva 24/26/51
-    #
-    # Sirve para elegir QUÉ signo marcar, que no cuesta nada. Gastar
-    # columnas con ella es otra cosa.
-    if c.fuente_prob == "calibracion":
-        return 0.0
-
     orden = sorted(SIGNOS, key=lambda s: c.p_prob[s], reverse=True)
     p_segundo = c.p_prob[orden[1]]
 
@@ -123,7 +111,7 @@ def _prioridad_apertura(c: Casilla) -> float:
     # dispara, aunque el partido no esté abierto. En la jornada 4 de 2026-27
     # los TRES dobles del boleto se fueron a Liga F, que es precisamente la
     # competición con los resultados más claros.
-    if p_segundo < SEGUNDO_MINIMO_ABRIR:
+    if p_segundo < probabilidad_minima * FRACCION_SEGUNDO:
         return 0.0
 
     v_segundo = c.valor(orden[1]) or 0.0
@@ -144,7 +132,11 @@ def construir_cartera(
     if presupuesto_columnas < 1:
         raise ValueError("El presupuesto debe ser de al menos una columna.")
 
-    orden = sorted(casillas, key=_prioridad_apertura, reverse=True)
+    orden = sorted(
+        casillas,
+        key=lambda c: _prioridad_apertura(c, probabilidad_minima),
+        reverse=True,
+    )
 
     columnas = 1
     abiertas: set[int] = set()
@@ -268,8 +260,7 @@ def resumen_texto(cartera: dict, precio_columna: float = 0.75) -> str:
         # puede comprobar si Liga F está usando el modelo o ha caído al
         # mercado congelado, que es justo lo que se quiso cambiar.
         etiqueta = {
-            "mercado": "mer", "modelo": "mod",
-            "calibracion": "pub", "sin_datos": " — ",
+            "mercado": "mer", "modelo": "mod", "sin_datos": " — ",
         }.get(c.fuente_prob, c.fuente_prob[:3])
         lineas.append(
             f"{c.posicion:>2}. {etq:<{ancho}}  {marca:<3} [{etiqueta}] {c.motivo}"

@@ -44,7 +44,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api_client import ApiIngesta  # noqa: E402
 
-from optimizador.calibracion import desde_publico  # noqa: E402
 from optimizador.cartera import (  # noqa: E402
     SIGNOS,
     Casilla,
@@ -146,11 +145,11 @@ def _probabilidad(casilla: dict, lae: dict[str, float]):
     En LaLiga y Segunda al contrario: el mercado acierta el 52,7% y
     nosotros el 51,4%, así que manda el mercado.
 
-    Y si no hay ninguna de las dos, la curva del público. No sabe quién
-    juega —no es una predicción del partido, es una afirmación sobre cómo
-    se equivoca la gente— pero es muchísimo mejor que seguir al público,
-    que es lo que se hacía antes: un signo que juega el 80% sale la mitad
-    de las veces.
+    Y si no hay ninguna de las dos, no hay probabilidad y la casilla se
+    resuelve siguiendo al público, que es lo que se hacía siempre. No es
+    bueno —un signo que juega el 80% de la gente sale la mitad de las
+    veces— pero en la práctica no pasa: en la jornada 4 de 2026-27 las 14
+    casillas tuvieron mercado o modelo.
     """
     probs = casilla.get("probabilidades")
     modelo = _terna(probs.get("MODELO_PROPIO")) if isinstance(probs, dict) else None
@@ -167,9 +166,11 @@ def _probabilidad(casilla: dict, lae: dict[str, float]):
         if modelo:
             return modelo, "modelo"
 
-    calibrada = desde_publico(lae)
-    if calibrada:
-        return calibrada, "calibracion"
+    # Antes había aquí una tercera opción: una curva que convertía lo que
+    # juega el público en una probabilidad. Se quitó porque en la práctica
+    # nunca llegaba a usarse —siempre hay mercado o modelo— y cuando entraba
+    # aplanaba los repartos hasta hacer que un Barça femenino pareciera un
+    # partido abierto. Riesgo sin beneficio demostrado.
     return None, "sin_datos"
 
 
