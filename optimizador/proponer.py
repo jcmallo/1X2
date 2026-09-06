@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api_client import ApiIngesta  # noqa: E402
 
+from optimizador.calibracion import desde_publico  # noqa: E402
 from optimizador.cartera import (  # noqa: E402
     SIGNOS,
     Casilla,
@@ -108,6 +109,70 @@ def _publico(casilla: dict) -> dict[str, float] | None:
     return None
 
 
+def _es_liga_f(casilla: dict) -> bool:
+    """
+    Si la casilla es de Liga F.
+
+    Se mira la competición y, si no viniera, la marca '(F)' que el boleto
+    pone en los nombres de los equipos femeninos.
+    """
+    # El género viene de la tabla de competiciones, así que es más fiable
+    # que buscar 'liga f' en un nombre que puede cambiar.
+    if str(casilla.get("genero") or "").upper() == "F":
+        return True
+    comp = (casilla.get("competicion") or "").lower()
+    if "liga f" in comp or "femenin" in comp:
+        return True
+    nombres = f"{casilla.get('local', '')} {casilla.get('visitante', '')}"
+    return "(f)" in nombres.lower()
+
+
+def _probabilidad(casilla: dict, lae: dict[str, float]):
+    """
+    De dónde sale la probabilidad de esta casilla, por orden de preferencia.
+
+    LIGA F VA AL REVÉS QUE LAS DEMÁS, y no por capricho:
+
+      · Su "mercado" es un precio de 1xBet que no se mueve en toda la
+        semana. Medido: las cuatro capturas de una jornada salen idénticas.
+        Eso no es un mercado con dinero detrás informando el precio, es un
+        número puesto ahí. Tratarlo como si fuera Betfair es tomarse en
+        serio a quien no ha apostado nada.
+
+      · Y es justo donde nuestro modelo va mejor: 62,5% de acierto y
+        +0,2344 de mejora sobre el baseline, el mejor de las tres
+        competiciones, porque hay más diferencia real entre equipos.
+
+    En LaLiga y Segunda al contrario: el mercado acierta el 52,7% y
+    nosotros el 51,4%, así que manda el mercado.
+
+    Y si no hay ninguna de las dos, la curva del público. No sabe quién
+    juega —no es una predicción del partido, es una afirmación sobre cómo
+    se equivoca la gente— pero es muchísimo mejor que seguir al público,
+    que es lo que se hacía antes: un signo que juega el 80% sale la mitad
+    de las veces.
+    """
+    probs = casilla.get("probabilidades")
+    modelo = _terna(probs.get("MODELO_PROPIO")) if isinstance(probs, dict) else None
+    mercado = _terna(casilla.get("mercado"))
+
+    if _es_liga_f(casilla):
+        if modelo:
+            return modelo, "modelo"
+        if mercado:
+            return mercado, "mercado"
+    else:
+        if mercado:
+            return mercado, "mercado"
+        if modelo:
+            return modelo, "modelo"
+
+    calibrada = desde_publico(lae)
+    if calibrada:
+        return calibrada, "calibracion"
+    return None, "sin_datos"
+
+
 def construir_casillas(datos: dict) -> tuple[list[Casilla], CasillaPleno | None, list[int]]:
     """
     Traduce la respuesta de la API a los objetos del optimizador.
@@ -149,14 +214,14 @@ def construir_casillas(datos: dict) -> tuple[list[Casilla], CasillaPleno | None,
             descartadas.append(pos)
             continue
 
-        mercado = _terna(c.get("mercado"))
+        prob, fuente = _probabilidad(c, lae)
         casillas.append(Casilla(
             posicion=pos,
             local=c["local"],
             visitante=c["visitante"],
             p_lae=lae,
-            p_prob=mercado,
-            fuente_prob="mercado" if mercado else "sin_datos",
+            p_prob=prob,
+            fuente_prob=fuente,
         ))
 
     return casillas, pleno, descartadas

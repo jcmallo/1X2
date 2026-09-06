@@ -1,63 +1,67 @@
-Sustituye  analisis/riesgo_favorito.py
-
-Actions → "Riesgo del favorito" → Run workflow. El workflow no cambia.
-
-
-ESTA VEZ LO HE EJECUTADO ENTERO ANTES DE MANDÁRTELO
-
-Con una API falsa y datos inventados, de principio a fin. No he confiado en
-que las ediciones se aplicaran: cada una lleva un assert y he comprobado el
-resultado en el archivo.
-
-Y sirvió: la prueba destapó que yo tenía invertida la interpretación de la
-medida principal. Construí un público falso comprimido a propósito y el
-script lo etiquetaba como "exagera". Comprobado con casos de respuesta
-conocida:
-
-    fuente calibrada (dice = verdad)          pendiente 0,98
-    fuente comprimida (varía 4 veces menos)   pendiente 3,92
-    fuente exagerada (varía 1,6 veces más)    pendiente 0,61
-
-Es al revés de lo que parece: si una fuente comprime, entre dos porcentajes
-suyos muy parecidos hay realidades muy distintas, así que hace falta una
-pendiente grande para ir de una a otra. Corregido.
+Sustituye:
+    optimizador/calibracion.py   (NUEVO)
+    optimizador/proponer.py
+    web/index.php
+    web/optimizador.php
 
 
-QUÉ CAMBIA RESPECTO A LA VEZ ANTERIOR
+LO QUE HE ENCONTRADO AL METERME AHÍ
 
-Se miden LOS TRES SIGNOS de cada casilla en vez del más jugado.
+El optimizador NUNCA usaba MODELO_PROPIO. Solo miraba el mercado, y si no
+había mercado seguía al público — que es la peor estrategia posible de las
+que hemos medido: un signo que juega el 80% de la gente sale la mitad de
+las veces.
 
-Elegir el máximo de una fuente y compararlo con otra favorece a la primera
-por construcción: es el sesgo del argmax. Explicaba buena parte de los
-números que salían, y aquel "+18,8% de media" no era real. Con los tres
-signos no se elige nada, así que no hay sesgo: la casilla entra entera y
-sus porcentajes suman 100.
-
-Archivo reescrito de cero. Los últimos fallos venían de parchear con
-sustituciones sobre un texto que ya había cambiado cinco veces.
+En Liga F eso era doblemente malo, porque su "mercado" es un precio de
+1xBet que no se mueve en toda la semana (las cuatro capturas de una jornada
+salen idénticas) mientras el modelo es donde mejor va: 62,5% de acierto,
++0,2344, el mejor de las tres competiciones.
 
 
-QUÉ VA A IMPRIMIR
+EL ORDEN AHORA
 
-  EL PÚBLICO (porcentajes de LAE)
-  tramo             n     dice   ocurre    error   valor
-  0%-10%          NNN    x.x%     x.x%    +x.x%     x.xx
-  10%-20%         NNN    ...
-  ...
+    Liga F              modelo → mercado → curva del público
+    LaLiga y Segunda    mercado → modelo → curva del público
 
-  EL MODELO (fuera de muestra, como referencia)
-  ... la misma tabla
+Liga F va al revés a propósito. Su mercado no es un mercado con dinero
+detrás informando el precio, es un número puesto ahí. En LaLiga y Segunda
+sí lo es: el mercado acierta el 52,7% y nosotros el 51,4%.
 
-  SENSIBILIDAD
-    público   x.xx ± x.xx
-    modelo    x.xx ± x.xx
+La competición se detecta por el campo 'genero' de la tabla, no por buscar
+"liga f" en un nombre que puede cambiar.
 
-La columna VALOR es la que decide el boleto: cuántas veces ocurre por cada
-vez que se juega. Por encima de 1, el signo está infrajugado y paga más de
-lo que le corresponde. Es la misma cuenta que usa el optimizador, pero
-medida sobre lo que pasó de verdad.
 
-Si el público sale con pendiente claramente por encima de 1, la hipótesis
-se confirma: reparte casi igual en partidos claros y en igualados, y la
-tabla dice en qué tramos está el valor. Si sale cerca de 1, la hipótesis se
-cae y esta línea de investigación se cierra entera.
+LA CURVA DEL PÚBLICO
+
+optimizador/calibracion.py, con la tabla medida sobre 190 jornadas y 3.159
+observaciones. Suavizada con regresión isotónica porque la tabla observada
+no era creciente y habría hecho que un signo MÁS jugado recibiera MENOS
+probabilidad.
+
+VERIFICADO: he traducido el PHP línea a línea y comparado con el Python
+sobre 20.000 ternas al azar. Diferencia máxima: 0,00e+00. Idénticos.
+
+
+AVISO IMPORTANTE SOBRE LA CURVA
+
+No sabe quién juega. Dice "un signo que la gente ignora ocurre el 23% de
+las veces" porque eso es el promedio de la quiniela, donde la mayoría de
+partidos están igualados.
+
+Probado con Sevilla F - Barça F (público 6/13/81): la curva marcaría "12",
+incluyendo el local que juega el 6%. Eso es casi seguro un error — el Barça
+femenino gana casi siempre y ese 81% puede ser correcto.
+
+Por eso es el ÚLTIMO recurso. En Liga F entra primero el modelo, que sí
+sabe quién juega. La curva solo actúa cuando no hay ni mercado ni modelo,
+que debería ser raro.
+
+Si al ver una jornada real te parece que se pasa de agresiva, dímelo y la
+hago más conservadora: es cambiar una función de un archivo.
+
+
+CÓMO COMPROBARLO
+
+Lanza "Proponer boleto" con dry_run y mira la columna de motivo de las
+casillas de Liga F. Antes decía "sin datos propios: se sigue al público".
+Ahora debería decir algo con valor detrás.
