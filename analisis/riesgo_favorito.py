@@ -222,7 +222,7 @@ def probabilidades_fuera_de_muestra(filas: list[dict]) -> dict[str, list[float]]
     return salida
 
 
-def brechas(filas: list[dict]) -> tuple[dict[str, float], dict[str, str]]:
+def brechas(filas: list[dict]) -> tuple[dict[str, float], dict[str, str], dict[str, tuple]]:
     """
     La brecha de cada partido, calculada con lo que se sabía ANTES de jugarlo.
 
@@ -247,6 +247,7 @@ def brechas(filas: list[dict]) -> tuple[dict[str, float], dict[str, str]]:
     estado = caracteristicas.Estado()
     salida: dict[str, float] = {}
     signos: dict[str, str] = {}
+    partes: dict[str, tuple] = {}
     i_elo = caracteristicas.NOMBRES.index("elo_diferencia")
     i_forma = caracteristicas.NOMBRES.index("forma_diferencia")
 
@@ -257,11 +258,15 @@ def brechas(filas: list[dict]) -> tuple[dict[str, float], dict[str, str]]:
         # sería el Elo con un pellizco de forma.
         k = clave(dt.isoformat(), loc, vis)
         salida[k] = float(v[i_elo]) - float(v[i_forma])
+        # El Elo y la forma también por separado: la brecha los mezcla, y
+        # para saber si el público persigue la racha hace falta la racha
+        # sola, no la resta.
+        partes[k] = (float(v[i_elo]), float(v[i_forma]))
         if signo:
             signos[k] = signo
         estado.registrar(loc, vis, dt, gl, gv)
 
-    return salida, signos
+    return salida, signos, partes
 
 
 def terna(d: dict | None, a: str, b: str, c: str) -> list[float] | None:
@@ -315,7 +320,7 @@ def main() -> int:
     print(f"  {len(filas)} partidos con resultado")
 
     print("Calculando la brecha de cada partido...")
-    b, signos = brechas(filas)
+    b, signos, partes = brechas(filas)
     print(f"  {len(b)} brechas, {len(signos)} con signo conocido")
     print(f"  campos que trae cada resultado: {sorted(filas[0].keys())}"
           if filas else "  (sin resultados)")
@@ -414,9 +419,20 @@ def main() -> int:
             # sin fecha, así que la clave con fecha no puede casar.
             k = emparejar(c, j.get("etiqueta_temporada") or "", idx)
             if k is None:
-                sin_emparejar += 1
-                if len(fallos) < 6:
-                    fallos.append(c)
+                # La quiniela de verano se juega con ligas extranjeras
+                # (Noruega, sobre todo). No es que el emparejamiento falle:
+                # es que esos partidos no están en nuestra base, que solo
+                # sigue LaLiga, Segunda y Liga F. Contarlos como fallo
+                # dispara una alarma que no hay que atender.
+                nl = normalizar(c.get("local") or "")
+                nv = normalizar(c.get("visitante") or "")
+                if (nl and nl not in equipos_conocidos) or \
+                   (nv and nv not in equipos_conocidos):
+                    fuera_de_ambito += 1
+                else:
+                    sin_emparejar += 1
+                    if len(fallos) < 6:
+                        fallos.append(c)
                 continue
 
             # El favorito del PÚBLICO: a quién juega más gente. La pregunta
@@ -441,8 +457,10 @@ def main() -> int:
             pm = modelo.get(k)
             if pm is None:
                 continue        # sin probabilidad limpia no se puede controlar
+            _, forma_dif = partes.get(k, (0.0, 0.0))
+            forma = forma_dif if i == 0 else -forma_dif
             resultados.append((brecha, float(lae[i]), acerto, nombre,
-                               float(pm[i])))
+                               float(pm[i]), forma))
 
             # El desvío contra el mercado solo cuando hay cuotas: en el
             # histórico no las hay, y esperar a tenerlas habría dejado sin
@@ -621,6 +639,55 @@ def main() -> int:
                 print("  No hay señal. Una vez descontado lo bueno que es")
                 print("  cada equipo, la brecha entre reputación y forma no")
                 print("  explica el error del público. La idea se descarta.")
+
+        # --- C. ¿Persigue el público la racha? -------------------------
+        #
+        # Este test separa las dos explicaciones posibles del resultado de
+        # arriba, y lo hace SIN mirar resultados, así que no puede estar
+        # contaminado por ellos.
+        #
+        #   Si el público simplemente estima mal, su porcentaje se desviará
+        #   del modelo al azar, sin relación con la forma reciente.
+        #
+        #   Si el público persigue la racha, le dará MÁS que el modelo a los
+        #   equipos que vienen ganando, y menos a los que vienen perdiendo.
+        #
+        # Lo segundo sería un sesgo de comportamiento aprovechable; lo
+        # primero sería solo ruido.
+        print()
+        print("  " + "-" * 62)
+        print("  C · ¿LE DA EL PÚBLICO MÁS QUE EL MODELO A LOS EQUIPOS EN RACHA?")
+        print()
+        forma = np.array([r[5] for r in resultados])
+        desvio = pub - mod          # >0: el público da más que el modelo
+
+        r_c, err_c = correlacion(list(forma), list(desvio))
+        print(f"  correlación forma reciente ↔ (público − modelo): "
+              f"{r_c:+.3f} ± {err_c:.3f}")
+        print(f"  el público da de media {desvio.mean():+.1%} más que el modelo")
+
+        cf = np.percentile(forma, [25, 75])
+        fria, caliente = forma <= cf[0], forma > cf[1]
+        print()
+        print(f"  {'favorito que viene...':<28} {'n':>5} {'público':>9} "
+              f"{'modelo':>9} {'desvío':>9}")
+        for etiqueta, m in (("perdiendo (racha fría)", fria),
+                            ("ganando (racha caliente)", caliente)):
+            if m.sum() >= 20:
+                print(f"  {etiqueta:<28} {int(m.sum()):>5} {pub[m].mean():>8.1%} "
+                      f"{mod[m].mean():>8.1%} {desvio[m].mean():>+8.1%}")
+        print()
+        if not np.isnan(err_c) and r_c - err_c > 0.05:
+            print("  El público persigue la racha: le da más que el modelo a")
+            print("  los equipos que vienen ganando. Como la forma reciente")
+            print("  predice peor que el Elo, esos favoritos están")
+            print("  sobrejugados y ahí hay valor.")
+        elif not np.isnan(err_c) and r_c + err_c < -0.05:
+            print("  Al revés: el público desconfía de los equipos en racha.")
+        else:
+            print("  No hay relación clara. Entonces lo de arriba no es un")
+            print("  sesgo del público persiguiendo rachas, sino que la forma")
+            print("  reciente predice mal y punto. No es aprovechable.")
 
         # Y la versión contra el mercado, si hay cuotas.
         if len(muestras) >= 30:

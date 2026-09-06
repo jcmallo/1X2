@@ -1,75 +1,78 @@
 Sustituye  analisis/riesgo_favorito.py
 
-Actions → "Riesgo del favorito" → Run workflow. El workflow no cambia.
-Tarda algo más: ahora entrena el modelo por bloques para tener
-probabilidades no contaminadas.
+Actions → "Riesgo del favorito" → Run workflow.
 
 
-LO QUE DIJO EL LOG ANTERIOR, Y POR QUÉ NO VALÍA
+DOS COSAS
 
 
-1) LAS 1.366 CASILLAS SIN EMPAREJAR NO ERAN UN FALLO
+1) UN FALLO MÍO EN EL LOG ANTERIOR
 
-   'Stromsgodset' vs 'Valerenga', 'Haugesund' vs 'Rosenborg'...
+   Decía "1366 casillas de equipos CONOCIDOS que aun así no casan" y luego
+   enseñaba equipos noruegos. Contradictorio, y era culpa mía: la
+   comprobación que separa las competiciones que no seguimos nunca llegó a
+   insertarse en el archivo. Mi script de edición usó str.replace, que no
+   avisa cuando no encuentra el patrón, y yo di por bueno el "OK" que
+   imprimía él mismo.
 
-   Es la quiniela de verano, que se juega con la liga noruega. No están en
-   nuestra base porque solo seguimos LaLiga, Segunda y Liga F.
-
-   Ahora se cuentan aparte: "casillas de competiciones que no seguimos". El
-   aviso del 20% queda solo para los equipos que SÍ conocemos y aun así no
-   casan, que es el único caso que habría que arreglar.
-
-
-2) EL RESULTADO DE B ESTABA CONFUNDIDO
-
-   Salía espectacular:
-
-     brecha baja   ocurre 32,5%
-     brecha alta   ocurre 57,9%    diferencia +20,9%, p = 0,000
-
-   Pero la brecha es (elo − forma) y está DOMINADA por el Elo, que es el
-   predictor más fuerte que tenemos. Así que "brecha alta" significaba
-   sobre todo "el favorito es de verdad mucho mejor equipo".
-
-   Que gane más veces no es un hallazgo: es la definición de Elo. Ese test
-   decía "el Elo predice mejor que la forma reciente", que ya lo sabíamos.
+   Corregido y verificado. Ahora esas casillas se cuentan aparte y no
+   disparan la alarma del 20%, que estaba avisando de un problema
+   inexistente.
 
 
-LO QUE HACE AHORA
+2) EL RESULTADO SALIÓ AL REVÉS, Y HAY QUE AVERIGUAR POR QUÉ
 
-Agrupa los partidos por la probabilidad que les daba el modelo —o sea, por
-lo bueno que es el favorito— y DENTRO de cada grupo compara brecha alta
-contra brecha baja. Así se comparan partidos parecidos entre sí y lo que
-quede es lo que la calidad no explica.
+   Con la calidad controlada:
 
-Las probabilidades del modelo se calculan por bloques cronológicos: cada
-quinto de los partidos se predice con un modelo que solo ha visto los
-anteriores. Con un modelo entrenado con todo, las probabilidades estarían
-contaminadas por el resultado que se quiere explicar.
+                           brecha baja    brecha alta
+     poca probabilidad       -37,3%         -16,3%
+     probabilidad media      -13,2%         -13,0%
+     mucha probabilidad      -26,0%          +1,4%
 
-Imprime las dos tablas, la de antes y la nueva, para que se vea la
-diferencia.
+     diferencia +16,2%, p = 0,001
+
+   O sea: el público falla MUCHO MÁS cuando juega al equipo que viene en
+   buena forma con poca reputación, y casi acierta cuando juega al de
+   reputación alta y forma mala. Lo contrario de lo que buscábamos.
+
+   Hay dos explicaciones posibles y son muy distintas:
+
+     a) El público PERSIGUE LA RACHA. Sobrejuega a los equipos que vienen
+        ganando. Como la forma reciente predice peor que el Elo, esos
+        favoritos están sobrevalorados. Sería un sesgo aprovechable, solo
+        que el espejo del que buscábamos.
+
+     b) La forma reciente predice mal, y ya está. Dentro de un mismo nivel
+        de probabilidad, una brecha baja significa que esa probabilidad
+        viene más de la forma que del Elo. Esas casillas fallarían más
+        aunque el público fuese perfectamente racional. No sería
+        aprovechable.
 
 
-COMPROBADO CON DATOS SIMULADOS
+EL TEST C LAS SEPARA, Y NO MIRA RESULTADOS
 
-    sin efecto (solo Elo confundiendo)    con control   -1.0%
-    efecto reputación pequeño             con control   -4.7%
-    efecto reputación grande              con control   -8.9%
+Compara lo que da el público con lo que da el modelo, en función de la
+racha del favorito. Sin usar el resultado, así que no puede estar
+contaminado por él.
 
-Con efecto cero da casi cero; con efecto real lo detecta. La primera
-versión de esta validación estaba mal montada —recortaba los porcentajes al
-92% y truncaba justo el efecto— y daba señales al revés.
+   Si el público solo estima mal → la desviación no tendrá relación con la
+   racha.
+
+   Si el público persigue la racha → le dará más que el modelo a los
+   equipos que vienen ganando.
+
+Comprobado con datos simulados: sin persecución da +0,027; con persecución,
++0,796.
 
 
-CÓMO LEER LA TABLA BUENA
+CÓMO LEER LO QUE SALGA
 
-    el modelo da al favorito      brecha baja        brecha alta
-                                  n      error        n      error
-    poca probabilidad           NNN     +x.x%       NNN     +x.x%
-    probabilidad media          NNN     ...
-    mucha probabilidad          NNN     ...
+  correlación forma reciente ↔ (público − modelo): +x.xxx ± x.xxx
 
-Si el público se pasara por reputación, la columna de brecha alta sería MÁS
-negativa que la de brecha baja dentro de cada fila. Si las dos columnas se
-parecen, no hay efecto de reputación: solo había Elo disfrazado.
+  favorito que viene...          n   público    modelo    desvío
+  perdiendo (racha fría)       NNN     xx.x%     xx.x%    +x.x%
+  ganando (racha caliente)     NNN     xx.x%     xx.x%    +x.x%
+
+Si el desvío es claramente mayor en "ganando" que en "perdiendo", es la
+explicación (a) y hay algo que aprovechar. Si son parecidos, es la (b) y la
+idea se cierra del todo.
