@@ -1,78 +1,63 @@
 Sustituye  analisis/riesgo_favorito.py
 
-Actions → "Riesgo del favorito" → Run workflow.
+Actions → "Riesgo del favorito" → Run workflow. El workflow no cambia.
 
 
-DOS COSAS
+ESTA VEZ LO HE EJECUTADO ENTERO ANTES DE MANDÁRTELO
+
+Con una API falsa y datos inventados, de principio a fin. No he confiado en
+que las ediciones se aplicaran: cada una lleva un assert y he comprobado el
+resultado en el archivo.
+
+Y sirvió: la prueba destapó que yo tenía invertida la interpretación de la
+medida principal. Construí un público falso comprimido a propósito y el
+script lo etiquetaba como "exagera". Comprobado con casos de respuesta
+conocida:
+
+    fuente calibrada (dice = verdad)          pendiente 0,98
+    fuente comprimida (varía 4 veces menos)   pendiente 3,92
+    fuente exagerada (varía 1,6 veces más)    pendiente 0,61
+
+Es al revés de lo que parece: si una fuente comprime, entre dos porcentajes
+suyos muy parecidos hay realidades muy distintas, así que hace falta una
+pendiente grande para ir de una a otra. Corregido.
 
 
-1) UN FALLO MÍO EN EL LOG ANTERIOR
+QUÉ CAMBIA RESPECTO A LA VEZ ANTERIOR
 
-   Decía "1366 casillas de equipos CONOCIDOS que aun así no casan" y luego
-   enseñaba equipos noruegos. Contradictorio, y era culpa mía: la
-   comprobación que separa las competiciones que no seguimos nunca llegó a
-   insertarse en el archivo. Mi script de edición usó str.replace, que no
-   avisa cuando no encuentra el patrón, y yo di por bueno el "OK" que
-   imprimía él mismo.
+Se miden LOS TRES SIGNOS de cada casilla en vez del más jugado.
 
-   Corregido y verificado. Ahora esas casillas se cuentan aparte y no
-   disparan la alarma del 20%, que estaba avisando de un problema
-   inexistente.
+Elegir el máximo de una fuente y compararlo con otra favorece a la primera
+por construcción: es el sesgo del argmax. Explicaba buena parte de los
+números que salían, y aquel "+18,8% de media" no era real. Con los tres
+signos no se elige nada, así que no hay sesgo: la casilla entra entera y
+sus porcentajes suman 100.
 
-
-2) EL RESULTADO SALIÓ AL REVÉS, Y HAY QUE AVERIGUAR POR QUÉ
-
-   Con la calidad controlada:
-
-                           brecha baja    brecha alta
-     poca probabilidad       -37,3%         -16,3%
-     probabilidad media      -13,2%         -13,0%
-     mucha probabilidad      -26,0%          +1,4%
-
-     diferencia +16,2%, p = 0,001
-
-   O sea: el público falla MUCHO MÁS cuando juega al equipo que viene en
-   buena forma con poca reputación, y casi acierta cuando juega al de
-   reputación alta y forma mala. Lo contrario de lo que buscábamos.
-
-   Hay dos explicaciones posibles y son muy distintas:
-
-     a) El público PERSIGUE LA RACHA. Sobrejuega a los equipos que vienen
-        ganando. Como la forma reciente predice peor que el Elo, esos
-        favoritos están sobrevalorados. Sería un sesgo aprovechable, solo
-        que el espejo del que buscábamos.
-
-     b) La forma reciente predice mal, y ya está. Dentro de un mismo nivel
-        de probabilidad, una brecha baja significa que esa probabilidad
-        viene más de la forma que del Elo. Esas casillas fallarían más
-        aunque el público fuese perfectamente racional. No sería
-        aprovechable.
+Archivo reescrito de cero. Los últimos fallos venían de parchear con
+sustituciones sobre un texto que ya había cambiado cinco veces.
 
 
-EL TEST C LAS SEPARA, Y NO MIRA RESULTADOS
+QUÉ VA A IMPRIMIR
 
-Compara lo que da el público con lo que da el modelo, en función de la
-racha del favorito. Sin usar el resultado, así que no puede estar
-contaminado por él.
+  EL PÚBLICO (porcentajes de LAE)
+  tramo             n     dice   ocurre    error   valor
+  0%-10%          NNN    x.x%     x.x%    +x.x%     x.xx
+  10%-20%         NNN    ...
+  ...
 
-   Si el público solo estima mal → la desviación no tendrá relación con la
-   racha.
+  EL MODELO (fuera de muestra, como referencia)
+  ... la misma tabla
 
-   Si el público persigue la racha → le dará más que el modelo a los
-   equipos que vienen ganando.
+  SENSIBILIDAD
+    público   x.xx ± x.xx
+    modelo    x.xx ± x.xx
 
-Comprobado con datos simulados: sin persecución da +0,027; con persecución,
-+0,796.
+La columna VALOR es la que decide el boleto: cuántas veces ocurre por cada
+vez que se juega. Por encima de 1, el signo está infrajugado y paga más de
+lo que le corresponde. Es la misma cuenta que usa el optimizador, pero
+medida sobre lo que pasó de verdad.
 
-
-CÓMO LEER LO QUE SALGA
-
-  correlación forma reciente ↔ (público − modelo): +x.xxx ± x.xxx
-
-  favorito que viene...          n   público    modelo    desvío
-  perdiendo (racha fría)       NNN     xx.x%     xx.x%    +x.x%
-  ganando (racha caliente)     NNN     xx.x%     xx.x%    +x.x%
-
-Si el desvío es claramente mayor en "ganando" que en "perdiendo", es la
-explicación (a) y hay algo que aprovechar. Si son parecidos, es la (b) y la
-idea se cierra del todo.
+Si el público sale con pendiente claramente por encima de 1, la hipótesis
+se confirma: reparte casi igual en partidos claros y en igualados, y la
+tabla dice en qué tramos está el valor. Si sale cerca de 1, la hipótesis se
+cae y esta línea de investigación se cierra entera.
