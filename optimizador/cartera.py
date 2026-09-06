@@ -227,7 +227,28 @@ def resumen_texto(cartera: dict, precio_columna: float = 0.75) -> str:
     for c in cas:
         marca = "".join(s for s in SIGNOS if s in c.marcados)
         etq = f"{c.local} - {c.visitante}"
-        lineas.append(f"{c.posicion:>2}. {etq:<{ancho}}  {marca:<3}  {c.motivo}")
+        # De dónde sale la probabilidad de esta casilla. Sin esto no se
+        # puede comprobar si Liga F está usando el modelo o ha caído al
+        # mercado congelado, que es justo lo que se quiso cambiar.
+        etiqueta = {
+            "mercado": "mer", "modelo": "mod",
+            "calibracion": "pub", "sin_datos": " — ",
+        }.get(c.fuente_prob, c.fuente_prob[:3])
+        lineas.append(
+            f"{c.posicion:>2}. {etq:<{ancho}}  {marca:<3} [{etiqueta}] {c.motivo}"
+        )
+
+    # Cuántas casillas ha resuelto cada fuente. Es la comprobación rápida
+    # de que la cadena de preferencia hace lo que debe.
+    cuenta: dict[str, int] = {}
+    for c in cas:
+        cuenta[c.fuente_prob] = cuenta.get(c.fuente_prob, 0) + 1
+    lineas.append("")
+    lineas.append(
+        "  fuentes: " + " · ".join(
+            f"{n} {k}" for k, n in sorted(cuenta.items(), key=lambda x: -x[1])
+        )
+    )
 
     coste = cartera["columnas"] * precio_columna
     lineas.append("")

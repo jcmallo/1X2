@@ -198,11 +198,24 @@ def construir_casillas(datos: dict) -> tuple[list[Casilla], CasillaPleno | None,
                     local = _cuatro(bloque.get("local"))
                     visitante = _cuatro(bloque.get("visitante"))
                     if local and visitante:
+                        # El modelo de goles, si está. Sin esto el Pleno se
+                        # quedaba siguiendo al público —"sin modelo: se
+                        # sigue al público"— que es la peor estrategia
+                        # medida: un signo que juega el 80% de la gente sale
+                        # la mitad de las veces.
+                        propio = p15.get("MODELO_PROPIO")
+                        m_loc = m_vis = None
+                        if isinstance(propio, dict):
+                            m_loc = _cuatro(propio.get("local"))
+                            m_vis = _cuatro(propio.get("visitante"))
+
                         pleno = CasillaPleno(
                             local=c["local"],
                             visitante=c["visitante"],
                             p_lae_local=local,
                             p_lae_visitante=visitante,
+                            p_prob_local=m_loc,
+                            p_prob_visitante=m_vis,
                         )
                         break
             if pleno is None:
