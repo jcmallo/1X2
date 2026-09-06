@@ -70,6 +70,13 @@ class Casilla:
         return max(SIGNOS, key=lambda s: fuente[s])
 
 
+# Probabilidad mínima que debe tener el segundo signo para que merezca la
+# pena abrir un doble. Por debajo de esto, la casilla se queda simple aunque
+# su valor sea altísimo: pagar el doble de columnas por un signo al 15% sale
+# perdiendo aunque el público lo juegue poco.
+SEGUNDO_MINIMO_ABRIR = 0.22
+
+
 def _prioridad_apertura(c: Casilla) -> float:
     """
     Cuánto merece la pena abrir esta casilla a doble.
@@ -88,7 +95,37 @@ def _prioridad_apertura(c: Casilla) -> float:
     if not c.tiene_probabilidad:
         return h * 0.6
 
+    # La curva del público NUNCA abre un doble.
+    #
+    # No sabe quién juega: convierte cualquier reparto en algo parecido a
+    # 25/30/45, así que todos los partidos le parecen abiertos. En la
+    # jornada 4 de 2026-27 eso se llevó los TRES dobles del boleto a Liga F
+    # —la competición con los resultados más claros— porque el público se
+    # concentra mucho allí y la curva lo aplanaba:
+    #
+    #     Sevilla F - Barça F   público 6/13/81  →  curva 24/26/51
+    #
+    # Sirve para elegir QUÉ signo marcar, que no cuesta nada. Gastar
+    # columnas con ella es otra cosa.
+    if c.fuente_prob == "calibracion":
+        return 0.0
+
     orden = sorted(SIGNOS, key=lambda s: c.p_prob[s], reverse=True)
+    p_segundo = c.p_prob[orden[1]]
+
+    # Un doble compra la probabilidad del segundo signo a cambio de duplicar
+    # las columnas. Si ese segundo signo es improbable, es dinero tirado por
+    # mucho valor que tenga.
+    #
+    # Sin esta puerta, el multiplicador de valor arrastraba a abrir partidos
+    # decididos: en Liga F el público se concentra mucho (un 81% al Barça),
+    # así que el segundo signo tiene un porcentaje diminuto y el valor se
+    # dispara, aunque el partido no esté abierto. En la jornada 4 de 2026-27
+    # los TRES dobles del boleto se fueron a Liga F, que es precisamente la
+    # competición con los resultados más claros.
+    if p_segundo < SEGUNDO_MINIMO_ABRIR:
+        return 0.0
+
     v_segundo = c.valor(orden[1]) or 0.0
     return h * min(v_segundo, 2.5)
 
