@@ -1,53 +1,75 @@
-Sustituye:
-    analisis/riesgo_favorito.py
-    .github/workflows/riesgo_favorito.yml   (solo para que mire todas por defecto)
+Sustituye  analisis/riesgo_favorito.py
 
-Actions → "Riesgo del favorito" → Run workflow. Deja el campo como está.
-
-
-POR QUÉ FALLABA EL 100% DE LOS EMPAREJAMIENTOS
-
-Las 40 jornadas con datos de LAE son viejas y nunca se vincularon con la
-tabla de partidos: llegan sin partido_id y sin fecha. Mi clave era
-fecha+nombre, así que no podía casar ni una.
-
-Y encima yo había escrito mi propia normalización de nombres. Daba 2 de 8:
-
-    AT.MADRID → aaddimrt  contra  Atlético de Madrid → addimr
-
-Este proyecto ya resuelve eso todas las semanas en
-mercado/vincular_boleto.py, con tabla de alias, filtro de palabras de
-relleno y un umbral de parecido ya calibrado en 0,72. Ahora se importa de
-ahí en vez de tener dos criterios distintos para lo mismo.
-
-Comprobado, 10 de 10:
-
-    AT.MADRID    → atletico madrid   | Atlético de Madrid  1.00
-    ATH.CLUB (F) → ath               | Athletic Club       0.95
-    DEPORTIVO    → deportivo coruna  | RC Deportivo        1.00
-    LOGROÑO (F)  → logrono           | EDF Logroño         0.95
-
-Y no confunde equipos distintos: AT.MADRID contra Real Madrid da 0,69, por
-debajo del umbral. Además se exige que casen los DOS equipos del partido,
-no uno.
+Actions → "Riesgo del favorito" → Run workflow. El workflow no cambia.
+Tarda algo más: ahora entrena el modelo por bloques para tener
+probabilidades no contaminadas.
 
 
-LA TEMPORADA ES LO QUE DESAMBIGUA
-
-Como no hay fecha, se busca dentro de la temporada de la jornada: ahí un
-enfrentamiento con un local y un visitante concretos ocurre una sola vez.
-No hace falta la fecha del partido.
+LO QUE DIJO EL LOG ANTERIOR, Y POR QUÉ NO VALÍA
 
 
-EL RESULTADO SALE DEL BOLETO
+1) LAS 1.366 CASILLAS SIN EMPAREJAR NO ERAN UN FALLO
 
-signo_oficial viene en la propia casilla, así que el resultado ya no
-depende de emparejar con la tabla de partidos. Solo la brecha lo necesita.
+   'Stromsgodset' vs 'Valerenga', 'Haugesund' vs 'Rosenborg'...
+
+   Es la quiniela de verano, que se juega con la liga noruega. No están en
+   nuestra base porque solo seguimos LaLiga, Segunda y Liga F.
+
+   Ahora se cuentan aparte: "casillas de competiciones que no seguimos". El
+   aviso del 20% queda solo para los equipos que SÍ conocemos y aun así no
+   casan, que es el único caso que habría que arreglar.
 
 
-SI VUELVE A FALLAR
+2) EL RESULTADO DE B ESTABA CONFUNDIDO
 
-Cuando el emparejamiento falla en más del 20%, el script imprime las
-casillas tal como llegan (partido_id, fecha, nombres, normalizado) y cómo
-se llaman los equipos en la tabla de resultados. Una ejecución tarda
-minutos: mejor que diga qué pasa a tener que adivinarlo.
+   Salía espectacular:
+
+     brecha baja   ocurre 32,5%
+     brecha alta   ocurre 57,9%    diferencia +20,9%, p = 0,000
+
+   Pero la brecha es (elo − forma) y está DOMINADA por el Elo, que es el
+   predictor más fuerte que tenemos. Así que "brecha alta" significaba
+   sobre todo "el favorito es de verdad mucho mejor equipo".
+
+   Que gane más veces no es un hallazgo: es la definición de Elo. Ese test
+   decía "el Elo predice mejor que la forma reciente", que ya lo sabíamos.
+
+
+LO QUE HACE AHORA
+
+Agrupa los partidos por la probabilidad que les daba el modelo —o sea, por
+lo bueno que es el favorito— y DENTRO de cada grupo compara brecha alta
+contra brecha baja. Así se comparan partidos parecidos entre sí y lo que
+quede es lo que la calidad no explica.
+
+Las probabilidades del modelo se calculan por bloques cronológicos: cada
+quinto de los partidos se predice con un modelo que solo ha visto los
+anteriores. Con un modelo entrenado con todo, las probabilidades estarían
+contaminadas por el resultado que se quiere explicar.
+
+Imprime las dos tablas, la de antes y la nueva, para que se vea la
+diferencia.
+
+
+COMPROBADO CON DATOS SIMULADOS
+
+    sin efecto (solo Elo confundiendo)    con control   -1.0%
+    efecto reputación pequeño             con control   -4.7%
+    efecto reputación grande              con control   -8.9%
+
+Con efecto cero da casi cero; con efecto real lo detecta. La primera
+versión de esta validación estaba mal montada —recortaba los porcentajes al
+92% y truncaba justo el efecto— y daba señales al revés.
+
+
+CÓMO LEER LA TABLA BUENA
+
+    el modelo da al favorito      brecha baja        brecha alta
+                                  n      error        n      error
+    poca probabilidad           NNN     +x.x%       NNN     +x.x%
+    probabilidad media          NNN     ...
+    mucha probabilidad          NNN     ...
+
+Si el público se pasara por reputación, la columna de brecha alta sería MÁS
+negativa que la de brecha baja dentro de cada fila. Si las dos columnas se
+parecen, no hay efecto de reputación: solo había Elo disfrazado.

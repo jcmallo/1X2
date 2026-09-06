@@ -176,6 +176,52 @@ def emparejar(casilla: dict, temporada: str, idx: dict) -> str | None:
     return mejor if mejor_p >= UMBRAL else None
 
 
+def probabilidades_fuera_de_muestra(filas: list[dict]) -> dict[str, list[float]]:
+    """
+    La probabilidad que el modelo habría dado a cada partido SIN haberlo visto.
+
+    Hace falta para controlar por lo bueno que es cada equipo. Sin ese
+    control, la brecha entre reputación y forma se confunde con el Elo —que
+    la domina— y el análisis acaba diciendo "el Elo predice mejor que la
+    forma", que ya lo sabíamos y no es la pregunta.
+
+    Se entrena por bloques cronológicos: cada quinto de los partidos se
+    predice con un modelo que solo ha visto los anteriores. Usar un modelo
+    entrenado con todo daría probabilidades contaminadas por el resultado
+    que se quiere explicar.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    X, y, meta, _ = caracteristicas.construir(filas)
+    Xa, ya = np.array(X), np.array(y)
+
+    orden = []
+    for f in filas:
+        try:
+            orden.append((datetime.fromisoformat(f["fecha_hora_inicio"]),
+                          f["equipo_local"], f["equipo_visitante"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    orden.sort()
+
+    salida: dict[str, list[float]] = {}
+    n = len(Xa)
+    bloque = n // 5
+    for i in range(1, 5):
+        ini, fin = i * bloque, (i + 1) * bloque if i < 4 else n
+        m = make_pipeline(StandardScaler(),
+                          LogisticRegression(max_iter=2000, C=0.5))
+        m.fit(Xa[:ini], ya[:ini])
+        pr = m.predict_proba(Xa[ini:fin])
+        for j2, p in zip(range(ini, fin), pr):
+            if j2 < len(orden):
+                dt, loc, vis = orden[j2]
+                salida[clave(dt.isoformat(), loc, vis)] = [float(x) for x in p]
+    return salida
+
+
 def brechas(filas: list[dict]) -> tuple[dict[str, float], dict[str, str]]:
     """
     La brecha de cada partido, calculada con lo que se sabía ANTES de jugarlo.
@@ -274,6 +320,10 @@ def main() -> int:
     print(f"  campos que trae cada resultado: {sorted(filas[0].keys())}"
           if filas else "  (sin resultados)")
 
+    print("Probabilidades del modelo fuera de muestra...")
+    modelo = probabilidades_fuera_de_muestra(filas)
+    print(f"  {len(modelo)} partidos con probabilidad no contaminada")
+
     idx = indexar(filas)
     print(f"  {sum(len(v) for v in idx.values())} pares indexados en "
           f"{len(idx)} temporadas")
@@ -314,7 +364,13 @@ def main() -> int:
     resultados = []        # (brecha, gano_el_favorito)
     con_lae = 0
     sin_emparejar = 0
+    fuera_de_ambito = 0
     fallos: list[dict] = []
+    equipos_conocidos = {
+        normalizar(f.get("equipo_local", "")) for f in filas
+    } | {
+        normalizar(f.get("equipo_visitante", "")) for f in filas
+    }
 
     for j in jornadas:
         try:
@@ -382,7 +438,11 @@ def main() -> int:
 
             acerto = 1.0 if real == ("1" if i == 0 else "2") else 0.0
             nombre = f"{c.get('local')} - {c.get('visitante')}"
-            resultados.append((brecha, float(lae[i]), acerto, nombre))
+            pm = modelo.get(k)
+            if pm is None:
+                continue        # sin probabilidad limpia no se puede controlar
+            resultados.append((brecha, float(lae[i]), acerto, nombre,
+                               float(pm[i])))
 
             # El desvío contra el mercado solo cuando hay cuotas: en el
             # histórico no las hay, y esperar a tenerlas habría dejado sin
@@ -396,8 +456,13 @@ def main() -> int:
     print(f"  {con_lae} jornadas con porcentajes de LAE")
     print(f"  {len(resultados)} casillas con LAE y resultado conocido")
     print(f"  {len(muestras)} de ellas con cuotas de mercado además")
+    if fuera_de_ambito:
+        print(f"  {fuera_de_ambito} casillas de competiciones que no seguimos")
+        print("    (la quiniela de verano se juega con ligas extranjeras;")
+        print("     no es un fallo, es que esos partidos no están en la base)")
     if sin_emparejar:
-        print(f"  {sin_emparejar} casillas que no casan con ningún resultado")
+        print(f"  {sin_emparejar} casillas de equipos CONOCIDOS que aun así "
+              "no casan")
         pct = 100 * sin_emparejar / max(sin_emparejar + len(resultados), 1)
         if pct > 20:
             print(f"    ATENCIÓN: es el {pct:.0f}%. Lo de abajo mediría una")
@@ -446,9 +511,14 @@ def main() -> int:
         br = np.array([r[0] for r in resultados])
         pub = np.array([r[1] for r in resultados])
         ok = np.array([r[2] for r in resultados])
+        mod = np.array([r[4] for r in resultados])
 
-        # Se parte por cuartiles de brecha en vez de por un umbral elegido a
-        # dedo: un umbral se puede mover hasta que salga lo que uno quiere.
+        # --- Sin control: lo que salió la vez anterior ------------------
+        #
+        # Se deja porque es instructivo ver por qué engañaba. La brecha está
+        # dominada por el Elo, así que "brecha alta" significa sobre todo
+        # "el favorito es de verdad mejor equipo". Que gane más veces no es
+        # un hallazgo: es la definición de Elo.
         cortes = np.percentile(br, [25, 50, 75])
         tramos = [
             ("brecha baja (reputación ≈ forma)", br <= cortes[0]),
@@ -456,61 +526,101 @@ def main() -> int:
             ("brecha media-alta", (br > cortes[1]) & (br <= cortes[2])),
             ("brecha alta (reputación >> forma)", br > cortes[2]),
         ]
-
         print()
+        print("  SIN CONTROLAR POR LA CALIDAD DEL FAVORITO (engañoso)")
         print(f"  {'tramo':<36} {'n':>5} {'juega':>7} {'ocurre':>7} {'error':>8}")
         for nombre, m in tramos:
             if m.sum() < 20:
                 continue
-            juega = float(pub[m].mean())
-            ocurre = float(ok[m].mean())
-            print(f"  {nombre:<36} {int(m.sum()):>5} {juega:>6.1%} "
-                  f"{ocurre:>6.1%} {ocurre - juega:>+8.1%}")
+            print(f"  {nombre:<36} {int(m.sum()):>5} {pub[m].mean():>6.1%} "
+                  f"{ok[m].mean():>6.1%} {ok[m].mean() - pub[m].mean():>+8.1%}")
+        print()
+        print("  Esta tabla mide sobre todo el Elo, no la reputación. Se")
+        print("  deja para poder comparar con la de abajo, que es la buena.")
+
+        # --- Con control: dentro de cada nivel de calidad ---------------
+        #
+        # Se agrupan los partidos por lo que el modelo les daba —o sea, por
+        # lo bueno que es el favorito— y DENTRO de cada grupo se compara la
+        # brecha alta con la baja. Así la comparación es entre partidos
+        # parecidos, y lo que quede es lo que la calidad no explica.
+        print()
+        print("  CONTROLANDO POR LA CALIDAD (esta es la buena)")
+        print(f"  {'el modelo da al favorito':<28} {'brecha baja':>18} "
+              f"{'brecha alta':>18}")
+        print(f"  {'':<28} {'n':>5} {'error':>12} {'n':>5} {'error':>12}")
+
+        niveles = np.percentile(mod, [33, 67])
+        grupos = [
+            ("poca probabilidad", mod <= niveles[0]),
+            ("probabilidad media", (mod > niveles[0]) & (mod <= niveles[1])),
+            ("mucha probabilidad", mod > niveles[1]),
+        ]
+        difs = []
+        for etiqueta, g in grupos:
+            if g.sum() < 60:
+                continue
+            # Los cuartiles se recalculan DENTRO del grupo: usar los
+            # globales metería aquí el sesgo que se intenta quitar.
+            cg = np.percentile(br[g], [25, 75])
+            baja = g & (br <= cg[0])
+            alta = g & (br > cg[1])
+            if baja.sum() < 20 or alta.sum() < 20:
+                continue
+            e_b = float(ok[baja].mean() - pub[baja].mean())
+            e_a = float(ok[alta].mean() - pub[alta].mean())
+            difs.append(e_a - e_b)
+            print(f"  {etiqueta:<28} {int(baja.sum()):>5} {e_b:>+11.1%} "
+                  f"{int(alta.sum()):>5} {e_a:>+11.1%}")
 
         print()
-        print("  La columna 'error' es lo que importa. Negativa significa que")
-        print("  el público se pasa: juega ese signo más de lo que ocurre.")
-        print("  Lo que buscamos es que sea MÁS negativa en la brecha alta")
-        print("  que en la baja. Si es igual de negativa en todos los tramos,")
-        print("  el público se pasa siempre y la reputación no explica nada.")
+        print("  Ahora se comparan partidos parecidos entre sí. Si el")
+        print("  público se pasara por reputación, la columna de brecha")
+        print("  alta sería MÁS negativa que la de brecha baja dentro de")
+        print("  cada fila. Si las dos columnas se parecen, no hay efecto")
+        print("  de reputación: solo había Elo disfrazado.")
 
-        alto = tramos[3][1]
-        bajo = tramos[0][1]
-        if alto.sum() >= 20 and bajo.sum() >= 20:
-            e_alto = float(ok[alto].mean() - pub[alto].mean())
-            e_bajo = float(ok[bajo].mean() - pub[bajo].mean())
-            print(f"\n  diferencia entre extremos: {e_alto - e_bajo:+.1%}")
+        if difs:
+            medio = float(np.mean(difs))
+            print(f"\n  diferencia media entre columnas: {medio:+.1%}")
 
-            # ¿Es eso más de lo que daría el azar? Se baraja la brecha y se
-            # mira cuántas veces sale una diferencia igual de grande por
-            # casualidad. Sin esto, cualquier número parece un hallazgo.
+            # Permutación dentro de cada grupo: se baraja la brecha solo
+            # entre partidos de calidad parecida, que es la hipótesis nula
+            # correcta aquí.
             rng = np.random.default_rng(23)
-            observado = e_alto - e_bajo
             veces = 0
             for _ in range(2000):
-                mezcla = rng.permutation(br)
-                ca = np.percentile(mezcla, [25, 75])
-                a = mezcla > ca[1]
-                z = mezcla <= ca[0]
-                if a.sum() < 20 or z.sum() < 20:
-                    continue
-                d = ((ok[a].mean() - pub[a].mean())
-                     - (ok[z].mean() - pub[z].mean()))
-                if abs(d) >= abs(observado):
+                simuladas = []
+                for etiqueta, g in grupos:
+                    if g.sum() < 60:
+                        continue
+                    idxg = np.where(g)[0]
+                    mezcla = rng.permutation(br[idxg])
+                    cg = np.percentile(mezcla, [25, 75])
+                    ba = idxg[mezcla <= cg[0]]
+                    al = idxg[mezcla > cg[1]]
+                    if len(ba) < 20 or len(al) < 20:
+                        continue
+                    simuladas.append(
+                        (ok[al].mean() - pub[al].mean())
+                        - (ok[ba].mean() - pub[ba].mean()))
+                if simuladas and abs(np.mean(simuladas)) >= abs(medio):
                     veces += 1
             p_valor = veces / 2000
-            print(f"  probabilidad de ver esto por azar: {p_valor:.3f}")
+            print(f"  probabilidad de verlo por azar: {p_valor:.3f}")
             print()
-            if p_valor < 0.05 and observado < 0:
-                print("  HAY SEÑAL. El público sobrejuega al favorito con")
-                print("  reputación por encima de su forma más de lo que")
-                print("  sobrejuega a los demás. Eso es valor aprovechable.")
+            if p_valor < 0.05 and medio < 0:
+                print("  HAY SEÑAL, y en la dirección esperada: a igualdad de")
+                print("  calidad, el público se pasa más con los favoritos")
+                print("  cuya reputación va por delante de su forma.")
             elif p_valor < 0.05:
-                print("  Hay señal, pero en la dirección CONTRARIA a la")
-                print("  esperada. Merece mirarse antes de usarla.")
+                print("  Hay señal, pero al revés de lo esperado: el público")
+                print("  se pasa MENOS con esos. Habría que entender por qué")
+                print("  antes de usarlo para nada.")
             else:
-                print("  No hay señal: lo observado entra dentro de lo que")
-                print("  produce el azar. La idea se descarta.")
+                print("  No hay señal. Una vez descontado lo bueno que es")
+                print("  cada equipo, la brecha entre reputación y forma no")
+                print("  explica el error del público. La idea se descarta.")
 
         # Y la versión contra el mercado, si hay cuotas.
         if len(muestras) >= 30:
