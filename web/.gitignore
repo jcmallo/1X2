@@ -1,0 +1,12 @@
+# NUNCA en el repositorio: el repositorio es público.
+#
+# Estos archivos llevan credenciales y solo deben existir en IONOS. Ojo:
+# esta lista protege cuando se sube con git desde el ordenador, pero la web
+# de GitHub NO la respeta al arrastrar archivos. Ahí hay que excluirlos a
+# mano.
+
+config_ia.php
+api/ingesta/bootstrap.php
+**/bootstrap.php
+.env
+*.local.php
