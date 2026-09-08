@@ -119,16 +119,31 @@ def main() -> int:
 
     api = ApiIngesta()
 
+    # Se piden varias y se elige aquí la más reciente, en vez de fiarse de
+    # que el endpoint devuelva primero la que toca.
+    #
+    # No lo hacía: pidiendo una sola, sin argumentos devolvía la jornada 3 de
+    # 2026-27 estando cargadas la 4 y la 5, y con solo --jornada 5 devolvía
+    # la 5 de 2025-26, de la temporada pasada. El script vinculaba esa sin
+    # avisar de nada, porque no tenía forma de saber que era la equivocada.
     jornadas = api.contexto_quiniela(
         temporada=args.temporada or None,
         numero_jornada=args.jornada or None,
-        limite=1,
+        limite=1 if (args.temporada and args.jornada) else 30,
     )
     if not jornadas:
         print("No hay ninguna jornada cargada con esos criterios.")
         return 1
 
-    jornada = jornadas[0]
+    # Las etiquetas de temporada son de ancho fijo ('2026-27'), así que
+    # ordenarlas como texto las ordena bien de verdad.
+    jornada = max(
+        jornadas,
+        key=lambda x: (str(x.get("etiqueta_temporada") or ""),
+                       int(x.get("numero_jornada") or 0)),
+    )
+    if len(jornadas) > 1:
+        print(f"  {len(jornadas)} jornadas devueltas; se toma la más reciente")
     casillas = jornada.get("casillas", [])
     print(
         f"Jornada {jornada['numero_jornada']} · {jornada['etiqueta_temporada']} "
