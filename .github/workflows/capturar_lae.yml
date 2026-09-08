@@ -11,7 +11,14 @@ name: Capturar porcentajes de LAE
 
 on:
   schedule:
-    # miércoles, jueves y viernes a las 09:00 UTC
+    # Lunes y martes: cargar el boleto nuevo en cuanto SELAE lo publique.
+    #
+    # Los porcentajes todavía no existen —nadie ha jugado— así que estas dos
+    # pasadas van con --solo-boleto: traen los quince partidos y crean la
+    # jornada, nada más. Sin esto, la jornada nueva no aparecía en el panel
+    # hasta el miércoles, con el boleto ya a la venta desde el lunes.
+    - cron: "0 8 * * 1,2"
+    # De miércoles en adelante ya hay porcentajes que capturar.
     - cron: "0 9 * * 3,4,5"
     # sábado a las 10:00 UTC, cerca del cierre
     - cron: "0 10 * * 6"
@@ -21,6 +28,11 @@ on:
         description: "Forzar número de jornada (vacío = la que anuncie SELAE)"
         required: false
         type: string
+      solo_boleto:
+        description: "Cargar los 15 partidos aunque aún no haya porcentajes"
+        required: false
+        default: false
+        type: boolean
       dry_run:
         description: "Simular sin escribir en la base de datos"
         required: false
@@ -57,6 +69,12 @@ jobs:
           INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
           INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
         run: |
-          python lae_porcentajes.py \
+          # Lunes (1) y martes (2) es carga de boleto: aún no hay
+          # porcentajes que capturar. El resto de días, captura normal.
+          DIA=$(date -u +%u)
+          ARGS=""
+          if [ "$DIA" = "1" ] || [ "$DIA" = "2" ]; then ARGS="--solo-boleto"; fi
+          if [ "${{ inputs.solo_boleto }}" = "true" ]; then ARGS="--solo-boleto"; fi
+          python lae_porcentajes.py $ARGS \
             ${{ inputs.jornada && format('--jornada {0}', inputs.jornada) || '' }} \
             ${{ inputs.dry_run && '--dry-run' || '' }}

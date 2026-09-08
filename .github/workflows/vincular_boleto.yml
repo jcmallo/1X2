@@ -14,6 +14,10 @@ name: Vincular boleto con los partidos
 on:
   schedule:
     # Miércoles y viernes por la mañana, antes de capturar cuotas.
+    # Martes: en cuanto el boleto está cargado se vincula con los partidos.
+    # Sin vinculación no hay horarios, ni cuotas, ni contador, ni ventana de
+    # la IA: la jornada nueva se quedaba muda hasta el miércoles.
+    - cron: "20 8 * * 2"
     - cron: "40 8 * * 3,5"
   workflow_dispatch:
     inputs:

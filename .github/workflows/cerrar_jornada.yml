@@ -1,0 +1,77 @@
+name: Cerrar jornada
+
+# Escribe el resultado oficial de cada casilla de la jornada recién jugada.
+#
+# POR QUÉ FALTABA
+#
+# `signo_oficial` solo lo escribían los dos importadores del histórico, que
+# se usan una vez para cargar años pasados. Ninguna tarea semanal lo tocaba,
+# así que una jornada recién jugada no se cerraba nunca: la 4 de 2026-27
+# seguía apareciendo como pendiente el martes siguiente, con los partidos
+# jugados y el premio ya cobrado.
+#
+# El desplegable del panel construye la combinación ganadora con ese campo,
+# y el propio panel decide con él si una jornada está resuelta.
+#
+# El resultado sale de nuestra tabla de partidos, que se actualiza dos veces
+# al día. El boleto ya está vinculado con ellos, así que no hay que volver a
+# leer nada de SELAE.
+
+on:
+  schedule:
+    # Lunes a las 07:00 UTC, después del último partido del fin de semana y
+    # antes de que se cargue el boleto nuevo a las 08:00.
+    - cron: "0 7 * * 1"
+    # Martes a la misma hora, por si algún partido se aplazó al lunes. El
+    # script no escribe nada si ya estaba cerrada, así que repetir no cuesta.
+    - cron: "0 7 * * 2"
+  workflow_dispatch:
+    inputs:
+      temporada:
+        description: "Temporada (vacío = la más reciente)"
+        required: false
+        type: string
+      jornada:
+        description: "Número de jornada (vacío = la más reciente)"
+        required: false
+        type: string
+      dry_run:
+        description: "Simular sin escribir en la base de datos"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  cerrar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v7
+
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Probar puente IONOS
+        working-directory: ingestion
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: python probar_api.py
+
+      - name: Cerrar
+        working-directory: mercado
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: |
+          python cerrar_jornada.py \
+            ${{ inputs.temporada && format('--temporada {0}', inputs.temporada) || '' }} \
+            ${{ inputs.jornada && format('--jornada {0}', inputs.jornada) || '' }} \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
