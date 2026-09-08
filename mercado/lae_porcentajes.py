@@ -352,6 +352,10 @@ def main() -> int:
     )
     p.add_argument("--dry-run", action="store_true", help="no escribe, solo informa")
     p.add_argument("--jornada", type=int, default=0, help="forzar número de jornada")
+    p.add_argument(
+        "--solo-boleto", action="store_true",
+        help="cargar los 15 partidos aunque aún no haya porcentajes",
+    )
     args = p.parse_args()
 
     print("Leyendo el boleto...")
@@ -431,9 +435,22 @@ def main() -> int:
         print("\nDRY RUN: no se ha escrito nada.")
         return 0
 
+    # Cargar el boleto y capturar porcentajes son dos cosas distintas, y
+    # ocurren en momentos distintos: LAE publica los quince partidos el lunes
+    # o el martes, pero los porcentajes no existen hasta que la gente empieza
+    # a jugar. Antes esto abortaba y la jornada nueva no se creaba hasta el
+    # miércoles.
+    #
+    # Con --solo-boleto se guardan los partidos aunque no haya un solo
+    # porcentaje. Sin la bandera se mantiene la regla estricta: no guardar
+    # una captura parcial, que ensuciaría el histórico de franjas.
     if con_datos < 14:
-        print(f"\nSolo {con_datos} casillas con porcentaje; no se guarda nada.")
-        return 1
+        if not args.solo_boleto:
+            print(f"\nSolo {con_datos} casillas con porcentaje; no se guarda nada.")
+            print("Si lo que quieres es cargar la jornada nueva, usa --solo-boleto.")
+            return 1
+        print(f"\nSolo {con_datos} casillas con porcentaje, pero se guardan los")
+        print("quince partidos: es una carga de boleto, no una captura.")
 
     api = ApiIngesta()
     payload = {
@@ -443,7 +460,12 @@ def main() -> int:
         "fuente_fichero": f"selae_estadisticas_{franja}",
         # La franja distingue una captura previa del dato definitivo: no es lo
         # mismo lo que juega la gente el jueves que al cierre.
-        "tipo_lae": franja if franja != "DESCONOCIDA" else "ESTIMADO",
+        # Una carga sin porcentajes no es una captura de ninguna franja. Se
+        # marca aparte para que al entrenar no se confunda con un dato real.
+        "tipo_lae": (
+            "BOLETO" if con_datos < 14
+            else (franja if franja != "DESCONOCIDA" else "ESTIMADO")
+        ),
         "casillas": casillas,
     }
     if pleno:
