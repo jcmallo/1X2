@@ -90,7 +90,15 @@ def main() -> int:
             continue
 
         gl, gv = int(gl), int(gv)
-        casilla = {"posicion": pos}
+
+        # Los nombres van siempre: el endpoint es un importador y exige la
+        # casilla entera, no solo el campo que se quiere cambiar. Se
+        # reenvían tal como los devuelve el panel, así que no cambia nada.
+        casilla = {
+            "posicion": pos,
+            "equipo_local_impreso": (c.get("local") or "")[:100],
+            "equipo_visitante_impreso": (c.get("visitante") or "")[:100],
+        }
 
         if pos == 15:
             valor = f"{categoria(gl)}-{categoria(gv)}"
