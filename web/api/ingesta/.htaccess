@@ -1,9 +1,0 @@
-# Quiniela 1X2 - API privada de ingesta
-Options -Indexes
-
-# Nunca servir archivos internos/configuración.
-<FilesMatch "^(bootstrap\.php|README.*|.*\.example|.*\.md)$">
-    Require all denied
-</FilesMatch>
-
-# El directorio _private tiene además su propio bloqueo.
