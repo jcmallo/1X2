@@ -11,10 +11,27 @@ name: Importar jornadas pasadas de SELAE
 #   - rellenar las jornadas que faltan de la temporada en curso
 #   - reimportar el histórico con premios oficiales en lugar de estimados
 #
-# No está programado: se lanza a mano cuando hace falta. Reimportar es
-# idempotente, así que repetirlo actualiza en vez de duplicar.
+# Reimportar es idempotente, así que repetirlo actualiza en vez de duplicar.
+# La casilla conserva su partido_id y sus signos:
+#
+#     partido_id = COALESCE(VALUES(partido_id), partido_id)
+#
+# ADEMÁS CIERRA LAS JORNADAS JUGADAS, y es la única vía que funciona para
+# todas. cerrar_jornada.py deduce el resultado de nuestra tabla de partidos,
+# que solo tiene LaLiga, Segunda y Liga F: con la jornada de Champions del
+# 8 de septiembre se quedó a cero de quince y no pudo cerrarla. SELAE
+# publica la combinación de todas, incluidas las de verano con ligas
+# extranjeras.
 
 on:
+  schedule:
+    # A diario a las 06:00 UTC, mirando los últimos diez días.
+    #
+    # Diario y no lunes, porque las jornadas no siempre acaban el domingo:
+    # las de Champions terminan el miércoles o el jueves. Con una ventana de
+    # diez días, una jornada queda cerrada al día siguiente de jugarse sea
+    # cual sea el día, y los reintentos no cuestan nada.
+    - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
       modo:
@@ -80,6 +97,14 @@ jobs:
           INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
           INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
         run: |
+          # Sin modo (ejecución programada): los últimos diez días. Es lo
+          # que cierra la jornada recién jugada.
+          if [ -z "${{ inputs.modo }}" ]; then
+            python -m historico.importar_selae \
+              --desde "$(date -u -d '10 days ago' +%Y-%m-%d)"
+            exit $?
+          fi
+
           case "${{ inputs.modo }}" in
             "rango de fechas")
               ARGS="--desde ${{ inputs.desde }}"
