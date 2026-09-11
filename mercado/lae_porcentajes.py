@@ -470,8 +470,17 @@ def main() -> int:
     }
     if pleno:
         payload["pleno15"] = pleno
-    if boleto["cierre"]:
-        payload["fecha_sorteo"] = boleto["cierre"].strftime("%Y-%m-%d")
+    # Se manda la fecha de cierre venga de donde venga. Antes solo se
+    # enviaba la que publica SELAE, y cuando no la publicaba —que es lo
+    # normal— la jornada quedaba con fecha_sorteo a NULL.
+    #
+    # Eso no era cosmético: contexto_quiniela.php ordena por
+    # `fecha_sorteo DESC` y en MariaDB los NULL van al final. Con 686
+    # jornadas históricas fechadas por delante, las nuevas caían fuera del
+    # LIMIT y el vinculador ni las veía: el 11 de septiembre seguía
+    # trabajando sobre la jornada 3 con la 6 ya cargada.
+    if cierre:
+        payload["fecha_sorteo"] = cierre.strftime("%Y-%m-%d")
 
     r = api.importar_jornada_historica(payload)
     print(f"\nGuardado: {r.get('accion')}, jornada_id {r.get('jornada_id')}, "
