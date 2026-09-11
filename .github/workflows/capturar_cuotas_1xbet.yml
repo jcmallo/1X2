@@ -66,7 +66,12 @@ jobs:
 
       # Sin working-directory: el script importa el paquete `mercado`, así
       # que se ejecuta desde la raíz del repositorio con -m.
+      # Las dos fuentes son independientes y ninguna puede tumbar a la otra.
+      # 1xBet devuelve 403 a ratos —su antibot va por rachas— y eso hacía
+      # que SportyTrader ni llegara a ejecutarse, que es justo cuando más
+      # falta hace.
       - name: 1xBet
+        continue-on-error: true
         env:
           INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
           INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
