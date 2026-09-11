@@ -299,12 +299,47 @@ def main() -> int:
 
     print(f"\nJornada {jornada['numero']} · {jornada['temporada']}")
 
-    # Índice de equipos conocidos por nombre normalizado.
-    conocidos = {}
-    for eq in estado_final.historial:
-        conocidos.setdefault(normalizar(eq), eq)
+    # Índice de equipos conocidos, SEPARADO POR SEXO.
+    #
+    # Sin separar, el masculino y el femenino del mismo club colapsan en la
+    # misma clave: la normalización quita "(F)" del boleto y "Femenino" de
+    # la base, así que 'R.SOCIEDAD' y 'R.SOCIEDAD (F)' daban los dos
+    # 'real sociedad'. Entonces buscar() encontraba dos candidatos idénticos
+    # y devolvía None por su propia regla de no elegir ante la duda.
+    #
+    # El resultado era un "sin histórico de alguno de los dos equipos" en un
+    # Real Sociedad - At.Madrid, con cientos de partidos de los dos en la
+    # base. El Pleno se quedaba siguiendo al público.
+    #
+    # No vale añadir un sufijo al nombre: hay equipos femeninos que no
+    # llevan ninguna palabra que lo indique, como Madrid CFF o Badalona
+    # Women. El sexo hay que tomarlo del campo `genero`, que viene tanto en
+    # los resultados como en las casillas.
+    genero_equipo: dict[str, str] = {}
+    for f in filas:
+        g = (f.get("genero") or "").upper()[:1]
+        for k in ("equipo_local", "equipo_visitante"):
+            if f.get(k):
+                genero_equipo.setdefault(f[k], g)
 
-    def buscar(nombre: str) -> str | None:
+    conocidos: dict[tuple[str, str], str] = {}
+    for eq in estado_final.historial:
+        conocidos.setdefault((genero_equipo.get(eq, ""), normalizar(eq)), eq)
+
+    def sexo_de(casilla: dict) -> str:
+        """
+        'F' o 'M' para una casilla del boleto.
+
+        Se prefiere el campo `genero` de la competición; el '(F)' que
+        imprime el boleto es el respaldo cuando no viene.
+        """
+        g = (casilla.get("genero") or "").upper()[:1]
+        if g in ("F", "M"):
+            return g
+        nombres = f"{casilla.get('local', '')} {casilla.get('visitante', '')}"
+        return "F" if "(f)" in nombres.lower() else "M"
+
+    def buscar(nombre: str, sexo: str = "") -> str | None:
         """
         El equipo de la base que corresponde a este nombre del boleto.
 
@@ -314,11 +349,18 @@ def main() -> int:
         puntúan casi igual, como "Real Sporting" y "Sporting Club Huelva".
         """
         n = normalizar(nombre)
-        if n in conocidos:
-            return conocidos[n]
+
+        # Solo se compara contra equipos del mismo sexo. Si no se sabe cuál
+        # es, se compara contra todos, como antes.
+        candidatos = {
+            k: v for (g, k), v in conocidos.items()
+            if not sexo or not g or g == sexo
+        }
+        if n in candidatos:
+            return candidatos[n]
 
         puntuados = sorted(
-            ((parecido(n, k), v) for k, v in conocidos.items()),
+            ((parecido(n, k), v) for k, v in candidatos.items()),
             reverse=True,
         )
         if not puntuados or puntuados[0][0] < UMBRAL:
@@ -341,8 +383,9 @@ def main() -> int:
             descartadas.append((pos, c["local"], c["visitante"], c.get("competicion") or "?"))
             continue
 
-        local = buscar(c["local"])
-        visitante = buscar(c["visitante"])
+        sexo = sexo_de(c)
+        local = buscar(c["local"], sexo)
+        visitante = buscar(c["visitante"], sexo)
 
         if not local or not visitante:
             sin_equipo.append((pos, c["local"], c["visitante"]))
@@ -409,8 +452,9 @@ def main() -> int:
         (c for c in datos["casillas"] if int(c["posicion"]) == 15), None
     )
     if casilla15:
-        l15 = buscar(casilla15["local"])
-        v15 = buscar(casilla15["visitante"])
+        sexo15 = sexo_de(casilla15)
+        l15 = buscar(casilla15["local"], sexo15)
+        v15 = buscar(casilla15["visitante"], sexo15)
         if l15 and v15:
             historicos = []
             for f in filas:
