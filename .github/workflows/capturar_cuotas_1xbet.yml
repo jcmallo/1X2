@@ -1,4 +1,4 @@
-name: Capturar cuotas de Liga F (1xBet)
+name: Capturar cuotas de Liga F
 
 # Las cuotas de Liga F desde la API de linea de 1xBet.
 #
@@ -66,7 +66,7 @@ jobs:
 
       # Sin working-directory: el script importa el paquete `mercado`, así
       # que se ejecuta desde la raíz del repositorio con -m.
-      - name: Capturar cuotas de Liga F
+      - name: 1xBet
         env:
           INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
           INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
@@ -74,3 +74,26 @@ jobs:
           ARGS="--franja ${{ inputs.franja || 'T-24' }}"
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           python -m mercado.cuotas_1xbet $ARGS
+
+      # SportyTrader: la mediana de una docena de casas.
+      #
+      # Estaba escrito y sin ejecutar: no tenía workflow, así que nunca
+      # había corrido ni una vez. De ahí que la Liga F llevara semanas con
+      # una sola fuente.
+      #
+      # Y hace falta porque 1xBet no cotiza toda la competición. En la
+      # jornada 6 publicó tres partidos y solo uno estaba en el boleto:
+      # las casillas 11, 12 y 13 se quedaron sin columna de mercado, que es
+      # justo lo que el optimizador necesita para calcular el valor.
+      #
+      # `continue-on-error` porque SportyTrader es una web que se raspa: si
+      # cambia el HTML, lo que ya trajo 1xBet no se pierde.
+      - name: SportyTrader
+        continue-on-error: true
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: |
+          ARGS="--franja ${{ inputs.franja || 'T-24' }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m mercado.cuotas_ligaf $ARGS
