@@ -79,6 +79,12 @@ ALIAS = {
     "deportivo": "deportivo coruna", "rc deportivo": "deportivo coruna",
     "la coruna": "deportivo coruna", "d coruna": "deportivo coruna",
     "celta vigo": "celta", "espanyol barcelona": "espanyol",
+    # El filial estaba contemplado y el primer equipo no, y eso era
+    # justamente lo que lo rompía: "R.SOCIEDAD" daba "r sociedad", que se
+    # parece 0,870 a "real sociedad" y 0,800 a "real sociedad b". Siete
+    # milésimas por debajo del margen de seguridad de 0,08, así que buscar()
+    # se negaba a elegir y el Pleno se quedaba sin modelo.
+    "r sociedad": "real sociedad", "sociedad": "real sociedad",
     "r sociedad b": "real sociedad b", "sociedad b": "real sociedad b",
     "r madrid": "real madrid", "at madrid": "atletico madrid",
     # En nucleo_equipos el club figura como "Real Sporting", sin "Gijón".
