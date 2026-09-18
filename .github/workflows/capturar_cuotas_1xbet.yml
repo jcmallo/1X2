@@ -10,6 +10,12 @@ name: Capturar cuotas de Liga F
 # El Pleno al 15 lo captura el otro workflow (sportytrader), que lee el
 # marcador exacto de la casilla 15 sea de la competición que sea.
 #
+# Ni 1xBet ni SportyTrader cubren los ocho partidos siempre: hay jornadas
+# con casillas de Liga F que se quedan sin "% Apuestas" en el panel porque
+# ninguna de las dos tenía ese partido en el momento de la captura. El
+# tercer paso (Eduardo Losilla) solo rellena esos huecos concretos, nunca
+# sustituye lo que ya trajeron los dos anteriores.
+#
 # Se ejecuta junto con la captura de LaLiga: las cuotas se mueven durante la
 # semana y cada captura se guarda con su franja temporal, para que al
 # entrenar se use la que estaba disponible antes del partido y no la del
@@ -102,3 +108,21 @@ jobs:
           ARGS="--franja ${{ inputs.franja || 'T-24' }}"
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           python -m mercado.cuotas_ligaf $ARGS
+
+      # Eduardo Losilla: solo rellena lo que 1xBet y SportyTrader dejaron sin
+      # capturar. Por eso va el último, no antes: `solo_sin_cuotas` de
+      # contexto_cuotas.php tiene que ver ya lo que trajeron los dos pasos
+      # anteriores para saber qué es un hueco de verdad.
+      #
+      # `continue-on-error` por la misma razón que SportyTrader: es una web
+      # que se raspa (aquí, una API no documentada de un competidor), y si
+      # cambia no debe tumbar lo que ya se guardó.
+      - name: Eduardo Losilla (relleno de huecos)
+        continue-on-error: true
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: |
+          ARGS="--franja ${{ inputs.franja || 'T-24' }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m mercado.cuotas_losilla $ARGS
