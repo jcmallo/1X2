@@ -138,13 +138,38 @@ def parecido(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def _tupla_mercado(mer: dict | None) -> tuple[float, float, float] | None:
+    """
+    Normaliza {"p1":.., "px":.., "p2":..} a la tupla que espera
+    modelado/caracteristicas.py, o None si no hay dato. Se centraliza aquí
+    porque el campo llega con esa forma tanto desde contexto_resultados.php
+    (histórico, por partido) como desde contexto_dashboard.php (la jornada
+    que se pronostica, campo `c["mercado"]`).
+    """
+    if not mer:
+        return None
+    return float(mer["p1"]), float(mer["px"]), float(mer["p2"])
+
+
 def descargar_resultados(api: ApiIngesta) -> list[dict]:
-    """Todos los partidos con resultado, paginando."""
+    """
+    Todos los partidos con resultado, paginando.
+
+    Cuando contexto_resultados.php incluya el cierre de mercado vinculado a
+    un partido (campo "prob_mercado": {"p1":.., "px":.., "p2":..}, presente
+    solo si mercado/vincular_boleto.py o su variante histórica ya enlazó esa
+    casilla con este `partido_id`), se normaliza aquí a la tupla que espera
+    caracteristicas.construir(). Si el endpoint todavía no lo trae, o el
+    partido no está vinculado, queda en None: "sin dato" y no un cero o un
+    reparto inventado.
+    """
     todos: list[dict] = []
     offset = 0
     while True:
         d = api.contexto_resultados(limite=1000, offset=offset)
         items = d.get("items", [])
+        for it in items:
+            it["prob_mercado"] = _tupla_mercado(it.get("prob_mercado"))
         todos += items
         offset += len(items)
         if not d.get("hay_mas") or not items:
@@ -406,7 +431,10 @@ def main() -> int:
             except ValueError:
                 pass
 
-        vector = estado_final.caracteristicas(local, visitante, cuando)
+        mer = c.get("mercado")
+        vector = estado_final.caracteristicas(
+            local, visitante, cuando, _tupla_mercado(mer),
+        )
         p1, px, p2 = modelo.predict_proba(np.array([vector]))[0]
 
         casillas.append({
@@ -416,8 +444,6 @@ def main() -> int:
             "p2": round(float(p2), 6),
         })
         pr = {"1": p1, "X": px, "2": p2}
-
-        mer = c.get("mercado")
         cmp_ = ""
         if mer:
             cmp_ = (f"   mercado {mer['p1']*100:.0f}/{mer['px']*100:.0f}/{mer['p2']*100:.0f}")
