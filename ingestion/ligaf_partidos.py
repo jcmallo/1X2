@@ -20,7 +20,7 @@ import re
 import time
 import unicodedata
 from datetime import datetime, timezone
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -158,16 +158,67 @@ def descubrir_partidos(html: str) -> list[str]:
     return list(encontrados.values())
 
 
-def parse_titulo(soup: BeautifulSoup) -> tuple[str, str]:
+def catalogo_equipos_pagina(soup: BeautifulSoup) -> dict[str, str]:
+    """Catálogo slug->nombre de todos los equipos enlazados en la página
+    (cabecera, plantillas, clasificación...). Se usa como respaldo cuando
+    el <title> no trae los dos equipos (por ejemplo, si ligaf.es publica en
+    algún momento un título promocional de un derbi, como ya le pasó a
+    laliga.com con "ELDERBI DE MADRID | LALIGA EA SPORTS")."""
+    catalogo: dict[str, str] = {}
+    for a in soup.find_all("a", href=True):
+        texto = a.get_text(" ", strip=True)
+        if not texto:
+            continue
+        path = urlparse(urljoin(BASE, str(a["href"]))).path
+        m = re.search(r"/equipo/([^/]+)/\d+", path, re.I)
+        if not m:
+            continue
+        slug = m.group(1).strip().lower()
+        catalogo.setdefault(slug, texto)
+    return catalogo
+
+
+def equipos_desde_slug(
+    url: str,
+    catalogo: dict[str, str],
+) -> tuple[str, str] | None:
+    """Reconstruye local/visitante a partir de los dos slugs que trae la
+    propia URL de la ficha:
+
+        /partido/<slug-local>/<slug-visitante>/<id>/detalle
+
+    cuando el <title> no trae los nombres de los equipos. Se apoya en el
+    catálogo de equipos que la propia ficha enlaza (sus /equipo/...), nunca
+    en una lista de equipos escrita a mano."""
+    path = urlparse(url).path
+    m = re.match(r"^/partido/([^/]+)/([^/]+)/\d+", path, re.I)
+    if not m or not catalogo:
+        return None
+
+    local = catalogo.get(m.group(1).lower())
+    visitante = catalogo.get(m.group(2).lower())
+    if local and visitante:
+        return local, visitante
+    return None
+
+
+def parse_titulo(soup: BeautifulSoup, url: str) -> tuple[str, str]:
     titulo = soup.title.get_text(" ", strip=True) if soup.title else ""
     m = re.search(
         r"^(.*?)\s+Vs\s+(.*?)\s+-\s+Liga\s+F\b",
         titulo,
         re.I,
     )
-    if not m:
-        raise RuntimeError(f"No pude extraer equipos del título: {titulo!r}")
-    return m.group(1).strip(), m.group(2).strip()
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+
+    # Título sin los dos equipos (promocional, o cambio de plantilla de la
+    # web): respaldo a los slugs de la propia URL de la ficha.
+    equipos = equipos_desde_slug(url, catalogo_equipos_pagina(soup))
+    if equipos:
+        return equipos
+
+    raise RuntimeError(f"No pude extraer equipos del título: {titulo!r}")
 
 
 def ids_equipos(
@@ -299,7 +350,7 @@ def parse_partido(url: str, html: str) -> dict:
     if not mid:
         raise RuntimeError("No pude obtener el ID oficial del partido.")
 
-    local, visitante = parse_titulo(soup)
+    local, visitante = parse_titulo(soup, url)
     id_local, id_visitante = ids_equipos(soup, local, visitante)
     jornada, fecha = parse_fecha_y_jornada(texto)
     estado, goles_local, goles_visitante = parse_estado_y_resultado(
