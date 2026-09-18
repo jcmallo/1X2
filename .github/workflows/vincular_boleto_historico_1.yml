@@ -1,0 +1,71 @@
+name: Vincular boleto histórico (backfill)
+
+# Backfill puntual: vincula las casillas de temporadas PASADAS con sus
+# partidos en nucleo_partidos, algo que "Vincular boleto con los partidos"
+# solo hace para la jornada actual/reciente.
+#
+# No lleva schedule a propósito: es un backfill que se lanza a mano cuando
+# haga falta (p.ej. al ampliar el rango de temporadas), no una tarea
+# semanal. Por defecto corre en dry-run: hay que desmarcarlo explícitamente
+# en "Run workflow" para que escriba de verdad.
+
+on:
+  workflow_dispatch:
+    inputs:
+      temporadas:
+        description: "Temporadas, separadas por comas (vacío = 2022-23,2023-24,2024-25,2025-26)"
+        required: false
+        type: string
+      ventana_dias:
+        description: "Ventana de días alrededor de la fecha de sorteo"
+        required: false
+        default: "5"
+        type: string
+      dry_run:
+        description: "Simular sin escribir en la base de datos"
+        required: false
+        default: true
+        type: boolean
+      informe:
+        description: "Listar al final las casillas que quedaron sin vincular"
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  vincular_historico:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v7
+
+      - name: Instalar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Probar puente IONOS
+        working-directory: ingestion
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: python probar_api.py
+
+      # Sin working-directory: el script importa `mercado.vincular_boleto`,
+      # así que se ejecuta desde la raíz del repositorio con -m (igual que
+      # modelado.pronosticar).
+      - name: Vincular histórico
+        env:
+          INGEST_API_URL: ${{ secrets.INGEST_API_URL }}
+          INGEST_API_TOKEN: ${{ secrets.INGEST_API_TOKEN }}
+        run: |
+          ARGS="--ventana-dias ${{ inputs.ventana_dias || '5' }}"
+          if [ -n "${{ inputs.temporadas }}" ]; then ARGS="$ARGS --temporadas ${{ inputs.temporadas }}"; fi
+          if [ "${{ inputs.dry_run }}" != "false" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "${{ inputs.informe }}" != "false" ]; then ARGS="$ARGS --informe"; fi
+          python -m mercado.vincular_boleto_historico $ARGS
