@@ -231,7 +231,55 @@ def descubrir_partidos(html: str, cfg: dict) -> list[str]:
     return list(encontrados.values())
 
 
-def parse_titulo(soup: BeautifulSoup, cfg: dict) -> tuple[str, str]:
+def catalogo_clubes_pagina(soup: BeautifulSoup) -> dict[str, str]:
+    """Catálogo slug->nombre de todos los clubes enlazados en la página
+    (breadcrumbs, clasificación, escudos...). Se usa como respaldo cuando
+    el <title> no trae los dos equipos."""
+    catalogo: dict[str, str] = {}
+    for a in soup.find_all("a", href=True):
+        texto = a.get_text(" ", strip=True)
+        if not texto:
+            continue
+        path = urlparse(urljoin(BASE, str(a["href"]))).path
+        m = re.search(r"/clubes/([^/?#]+)", path, re.I)
+        if not m:
+            continue
+        slug = m.group(1).strip().lower()
+        catalogo.setdefault(slug, texto)
+    return catalogo
+
+
+def equipos_desde_slug(
+    url: str,
+    cfg: dict,
+    catalogo: dict[str, str],
+) -> tuple[str, str] | None:
+    """Reconstruye local/visitante a partir del slug de la URL cuando el
+    título es promocional (p.ej. "ELDERBI DE MADRID | LALIGA EA SPORTS",
+    "EL CLÁSICO | LALIGA EA SPORTS") y no trae los nombres de los equipos.
+    Se apoya en el catálogo de clubes que la propia ficha enlaza, nunca en
+    una lista de equipos escrita a mano."""
+    path = urlparse(url).path.rstrip("/")
+    ident = path.split("/")[-1]
+
+    prefijo = f"temporada-2026-2027-{cfg['match_slug']}-"
+    if not ident.startswith(prefijo) or not catalogo:
+        return None
+
+    resto = ident[len(prefijo):]
+    resto = re.sub(r"-\d+$", "", resto)  # quita la jornada final
+
+    for slug_local in sorted(catalogo, key=len, reverse=True):
+        if not resto.startswith(slug_local + "-"):
+            continue
+        slug_visitante = resto[len(slug_local) + 1:]
+        if slug_visitante in catalogo:
+            return catalogo[slug_local], catalogo[slug_visitante]
+
+    return None
+
+
+def parse_titulo(soup: BeautifulSoup, cfg: dict, url: str) -> tuple[str, str]:
     titulo = soup.title.get_text(" ", strip=True) if soup.title else ""
 
     m = re.search(
@@ -247,10 +295,16 @@ def parse_titulo(soup: BeautifulSoup, cfg: dict) -> tuple[str, str]:
             re.I,
         )
 
-    if not m:
-        raise RuntimeError(f"No pude extraer equipos del título: {titulo!r}")
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
 
-    return m.group(1).strip(), m.group(2).strip()
+    # Título promocional sin equipos (derbis, clásicos...): fallback al
+    # slug de la URL usando los clubes que la propia página enlaza.
+    equipos = equipos_desde_slug(url, cfg, catalogo_clubes_pagina(soup))
+    if equipos:
+        return equipos
+
+    raise RuntimeError(f"No pude extraer equipos del título: {titulo!r}")
 
 
 def id_equipo_desde_enlaces(
@@ -462,7 +516,7 @@ def parse_partido(
     if not id_partido.startswith("temporada-2026-2027-"):
         raise RuntimeError("No pude obtener el ID oficial del partido.")
 
-    local, visitante = parse_titulo(soup, cfg)
+    local, visitante = parse_titulo(soup, cfg, url)
     cadenas, i_local, i_visitante = localizar_cabecera(
         soup, local, visitante
     )
