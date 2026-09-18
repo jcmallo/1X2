@@ -64,8 +64,16 @@ NOMBRES = [
     "descanso_local", "descanso_visitante",
     "partidos_local", "partidos_visitante",
     "directos",
+    "prob_mercado_1", "prob_mercado_x", "prob_mercado_2", "tiene_mercado",
     "sesgo",
 ]
+
+# Probabilidad neutra para un partido sin cierre de mercado enlazado (la
+# mayoría del histórico todavía, mientras no se haya vinculado la casilla
+# de la quiniela con el partido): no decir nada es distinto de decir "1/X/2
+# igual de probables", así que "tiene_mercado" es lo que le permite al
+# modelo aprender a ignorar el valor relleno en vez de tomárselo en serio.
+PROB_MERCADO_NEUTRA = (1 / 3, 1 / 3, 1 / 3)
 
 SIGNO_A_CLASE = {"1": 0, "X": 1, "2": 2}
 
@@ -114,8 +122,24 @@ class Estado:
         dias = (cuando - self.historial[equipo][-1][0]).days
         return min(max(dias, 0), TOPE_DESCANSO) / TOPE_DESCANSO
 
-    def caracteristicas(self, local: str, visitante: str, cuando: datetime) -> list[float]:
-        """El vector que describe el partido, con la información previa a él."""
+    def caracteristicas(
+        self,
+        local: str,
+        visitante: str,
+        cuando: datetime,
+        prob_mercado: tuple[float, float, float] | None = None,
+    ) -> list[float]:
+        """
+        El vector que describe el partido, con la información previa a él.
+
+        `prob_mercado` son las probabilidades 1/X/2 con las que cerró el
+        mercado (LAE o Betfair) para esa casilla, si se ha podido vincular
+        el partido con la quiniela. Es información previa al partido tan
+        legítima como el Elo: el cierre de mercado ocurre siempre antes del
+        pitido inicial, así que no hay fuga de datos al usarla. Cuando no
+        hay vínculo se rellena con un valor neutro y `tiene_mercado` queda
+        a 0, para que el modelo aprenda a no apoyarse en ese relleno.
+        """
         f_loc, gf_loc, gc_loc = self._forma(local)
         f_vis, gf_vis, gc_vis = self._forma(visitante)
 
@@ -127,6 +151,13 @@ class Estado:
         vuelta = [1.0 - r for r in self.directos[(visitante, local)]]
         previos = (ida + vuelta)[-VENTANA_DIRECTOS:]
 
+        if prob_mercado is not None:
+            p1, px, p2 = prob_mercado
+            tiene_mercado = 1.0
+        else:
+            p1, px, p2 = PROB_MERCADO_NEUTRA
+            tiene_mercado = 0.0
+
         return [
             (self.valoracion(local) - self.valoracion(visitante)) / 100.0,
             f_loc, f_vis, f_loc - f_vis,
@@ -135,6 +166,7 @@ class Estado:
             len(self.historial[local]) / TEMPORADA,
             len(self.historial[visitante]) / TEMPORADA,
             sum(previos) / len(previos) if previos else 0.5,
+            p1, px, p2, tiene_mercado,
             1.0,
         ]
 
@@ -184,6 +216,12 @@ def construir(filas: list[dict]) -> tuple[list[list[float]], list[int], list[tup
                 "gv": int(f["goles_visitante"]),
                 "signo": f["signo"],
                 "competicion": f.get("competicion", ""),
+                # Ausente en la mayoría de filas todavía: solo lo trae
+                # contexto_resultados cuando la casilla de la quiniela ya
+                # se vinculó con este partido (ver mercado/vincular_boleto.py
+                # y su variante histórica). None es una respuesta válida,
+                # no un error: caracteristicas() sabe rellenarlo.
+                "prob_mercado": f.get("prob_mercado"),
             })
         except (KeyError, TypeError, ValueError):
             continue
@@ -201,7 +239,9 @@ def construir(filas: list[dict]) -> tuple[list[list[float]], list[int], list[tup
             continue
 
         # El orden importa: primero se describe, después se aprende.
-        X.append(estado.caracteristicas(p["local"], p["visitante"], p["dt"]))
+        X.append(estado.caracteristicas(
+            p["local"], p["visitante"], p["dt"], p["prob_mercado"],
+        ))
         y.append(clase)
         meta.append((p["competicion"], p["dt"], p["local"], p["visitante"]))
 
